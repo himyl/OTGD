@@ -13,3 +13,4 @@ from .SP import Similarity
 from .VID import VIDLoss
 from .GNN import GNNLoss
 from .OT import OTLoss
+from .CEOT import CEOTLoss
