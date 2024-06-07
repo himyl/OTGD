@@ -2,6 +2,126 @@ import torch
 from torch import nn
 import math
 import torch.nn.functional as F
+import dgl
+import dgl.backend as B
+from dgl import DGLGraph
+from scipy import sparse
+from dgl.nn.pytorch import TAGConv
+
+eps = 1e-7
+knn = 8
+
+""" HKD method directly add OT method """
+class HKDOTLoss(nn.Module):
+    def __init__(self, opt): #, method='pcc', ot_gamma=1, ot_eps=1e-6, ot_iter=20, device='cuda'):
+        super(HKDOTLoss, self).__init__()
+        self.embed_s = Embed(opt.s_dim, opt.feat_dim)
+        self.embed_t = Embed(opt.t_dim, opt.feat_dim)
+        self.gnn_s = Encoder(opt.feat_dim, opt.feat_dim)
+        self.gnn_t = Encoder(opt.feat_dim, opt.feat_dim)
+        self.contrast = NCEAverage(opt.feat_dim, opt.n_data, opt.nce_k).to(opt.device)
+        self.criterion = NCESoftmaxLoss()
+        self.feat_size = opt.feat_dim
+        self.hkd_weight = opt.hkd_weight
+        self.ot_weight = opt.ot_weight
+        self.method = opt.ot_method
+        self.ot_gamma = opt.ot_gamma
+        self.ot_eps = opt.ot_eps
+        self.ot_iter = opt.ot_iter
+        self.device = opt.device
+
+        u = torch.tensor([i for i in range(opt.batch_size * opt.nce_k)]).cuda()
+        v = torch.tensor([i for i in range(opt.batch_size * opt.nce_k)]).cuda()
+        self.G_neg = dgl.graph((u, v)).to(self.device)
+
+    def forward(self, epoch, f_s, l_s, f_t, l_t, idx, contrast_idx=None):
+        batchSize = f_s.size(0)
+        K = self.contrast.K
+        T = 0.07
+
+        weight_t, weight_s = self.contrast(batchSize, idx, contrast_idx)
+
+        # graph independent part
+        f_es = self.embed_s(f_s)
+        f_et = self.embed_t(f_t)
+        f_us, f_ut = self.contrast.get_pos(idx)
+        ls_pos = torch.einsum('nc,nc->n', [f_ut, f_es]).unsqueeze(-1)
+        lt_pos = torch.einsum('nc,nc->n', [f_us, f_et]).unsqueeze(-1)
+
+        ls_neg = torch.bmm(weight_t, f_es.view(batchSize, self.feat_size, 1)).squeeze()
+        lt_neg = torch.bmm(weight_s, f_et.view(batchSize, self.feat_size, 1)).squeeze()
+
+        out_s = torch.cat([ls_pos, ls_neg], dim=1)
+        out_s = torch.div(out_s, T)
+        out_s = out_s.contiguous()
+
+        out_t = torch.cat([lt_pos, lt_neg], dim=1)
+        out_t = torch.div(out_t, T)
+        out_t = out_t.contiguous()
+
+        loss = self.criterion(out_s) + self.criterion(out_t)
+
+        X = torch.cat((f_t, f_s), 0)
+        if self.method == 'pcc':
+            C = PCC(X)
+        elif self.method == 'cos':
+            C = cosine_similarity(X)
+        elif self.method == 'edu':
+            C = euclidean_dist(X)
+        else:
+            raise ValueError("Invalid method specified.")
+
+        n = C.shape[0] // 2
+        Nst = C[0:n, n:]  # Node matrix
+        M = 1 - Nst
+        # M = zscore_normalize(M)
+
+        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
+        P = P.squeeze(0)
+        P = column_normalize(P)
+
+        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
+
+        loss_e = self.hkd_weight * loss + self.ot_weight * loss_ot
+
+        if batchSize < knn:
+            return loss_e, loss, loss_ot, P, M
+
+        # graph nn
+        G_pos_s = knn_graph(l_s.detach(), knn).to(self.device)
+        G_pos_s.ndata['h'] = f_es
+        f_gs = self.gnn_s(G_pos_s)
+
+        G_pos_t = knn_graph(l_t.detach(), knn).to(self.device)
+        G_pos_t.ndata['h'] = f_et
+        f_gt = self.gnn_t(G_pos_t)
+
+        f_sgs, f_sgt = self.contrast.get_smooth(f_gs, f_gt, idx)
+
+        gs_pos = torch.einsum('nc,nc->n', [f_sgt, f_gs]).unsqueeze(-1)
+        gt_pos = torch.einsum('nc,nc->n', [f_sgs, f_gt]).unsqueeze(-1)
+
+        gs_neg = torch.bmm(weight_t, f_gs.view(batchSize, self.feat_size, 1)).squeeze()
+        gt_neg = torch.bmm(weight_s, f_gt.view(batchSize, self.feat_size, 1)).squeeze()
+
+        out_gs = torch.cat([gs_pos, gs_neg], dim=1)
+        out_gs = torch.div(out_gs, T)
+        out_gs = out_gs.contiguous()
+
+        out_gt = torch.cat([gt_pos, gt_neg], dim=1)
+        out_gt = torch.div(out_gt, T)
+        out_gt = out_gt.contiguous()
+
+        loss_g = self.criterion(out_gs) + self.criterion(out_gt)
+
+        self.contrast.update(f_es, f_et, idx)
+
+        loss_hkd = loss_g + loss
+        loss_tol = self.hkd_weight * loss_hkd + self.ot_weight * loss_ot
+
+        return loss_tol, loss_hkd, loss_ot, P, M
+        # return loss_g
+
 
 
 def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000
@@ -87,6 +207,37 @@ def doubly_normalize(P):
     P = column_normalize(P)
     return P
 
+def cos_distance_softmax(x):
+    soft = F.softmax(x, dim=2)
+    w = soft.norm(p=2, dim=2, keepdim=True)
+    return 1 - soft @ B.swapaxes(soft, -1, -2) / (w @ B.swapaxes(w, -1, -2)).clamp(min=eps)
+
+def knn_graph(x, k):
+    if B.ndim(x) == 2:
+        x = B.unsqueeze(x, 0)
+    n_samples, n_points, _ = B.shape(x)
+
+    dist = cos_distance_softmax(x)
+
+    fil = 1 - torch.eye(n_points, n_points, device=x.device)
+    dist = dist * B.unsqueeze(fil, 0)
+    dist = dist - B.unsqueeze(torch.eye(n_points, n_points, device=x.device), 0)
+
+    k_indices = B.argtopk(dist, k, 2, descending=False)
+
+    dst = B.copy_to(k_indices, B.cpu())
+    src = B.zeros_like(dst) + B.reshape(B.arange(0, n_points), (1, -1, 1))
+
+    per_sample_offset = B.reshape(B.arange(0, n_samples) * n_points, (-1, 1, 1))
+    dst += per_sample_offset
+    src += per_sample_offset
+    dst = B.reshape(dst, (-1,))
+    src = B.reshape(src, (-1,))
+    adj = sparse.csr_matrix((B.asnumpy(B.zeros_like(dst) + 1), (B.asnumpy(dst), B.asnumpy(src))))
+
+    g = DGLGraph(adj)    # g = DGLGraph(adj, readonly=True)
+    return g
+
 
 class NCEAverage(nn.Module):
     def __init__(self, inputSize, outputSize, K):
@@ -151,15 +302,25 @@ class NCESoftmaxLoss(nn.Module):
 
     def __init__(self):
         super(NCESoftmaxLoss, self).__init__()
-        self.criterion = nn.CrossEntropyLoss().cuda()
+        self.criterion = nn.CrossEntropyLoss()
 
     def forward(self, x):
         bsz = x.shape[0]
         # label 指定每个采样的正样本 idx = 0
-        label = torch.zeros([bsz]).cuda().long()
+        label = torch.zeros([bsz], device=x.device).long()
         loss = self.criterion(x, label)
         return loss
 
+class Encoder(nn.Module):
+    def __init__(self, in_dim, hidden_dim):
+        super(Encoder, self).__init__()
+        self.conv1 = TAGConv(in_dim, hidden_dim, k=1)
+        self.l2norm = Normalize(2)
+
+    def forward(self, g):
+        h = g.ndata['h']
+        h = self.l2norm(self.conv1(g, h))
+        return h
 
 class Embed(nn.Module):
     """Embedding module"""
@@ -189,72 +350,5 @@ class Normalize(nn.Module):
         return out
 
 
-class CEOTLoss(nn.Module):
-    def __init__(self, opt, method='pcc', ot_gamma=1, ot_eps=1e-6, ot_iter=20, device='cuda'):
-        super(CEOTLoss, self).__init__()
-        self.embed_s = Embed(opt.s_dim, opt.feat_dim)
-        self.embed_t = Embed(opt.t_dim, opt.feat_dim)
-        self.contrast = NCEAverage(opt.feat_dim, opt.n_data, opt.nce_k).cuda()
-        self.criterion = NCESoftmaxLoss()
-        self.feat_size = opt.feat_dim
-        self.method = method
-        self.ot_gamma = ot_gamma
-        self.ot_eps = ot_eps
-        self.ot_iter = ot_iter
-        self.device = device
 
-    def forward(self, epoch, f_s, f_t, idx, contrast_idx=None):
-        batchSize = f_s.size(0)
-        K = self.contrast.K
-        T = 0.07
 
-        weight_t, weight_s = self.contrast(batchSize, idx, contrast_idx)
-
-        # graph independent part
-        f_es = self.embed_s(f_s)
-        f_et = self.embed_t(f_t)
-        f_us, f_ut = self.contrast.get_pos(idx)
-        ls_pos = torch.einsum('nc,nc->n', [f_ut, f_es]).unsqueeze(-1)
-        lt_pos = torch.einsum('nc,nc->n', [f_us, f_et]).unsqueeze(-1)
-
-        ls_neg = torch.bmm(weight_t, f_es.view(batchSize, self.feat_size, 1)).squeeze()
-        lt_neg = torch.bmm(weight_s, f_et.view(batchSize, self.feat_size, 1)).squeeze()
-
-        out_s = torch.cat([ls_pos, ls_neg], dim=1)
-        out_s = torch.div(out_s, T)
-        out_s = out_s.contiguous()
-
-        out_t = torch.cat([lt_pos, lt_neg], dim=1)
-        out_t = torch.div(out_t, T)
-        out_t = out_t.contiguous()
-
-        loss = self.criterion(out_s) + self.criterion(out_t)
-
-        # X = torch.cat((f_et, f_es), 0).to(self.device)
-
-        X = torch.cat((f_t, f_s), 0).to(self.device)
-        if self.method == 'pcc':
-            C = PCC(X)
-        elif self.method == 'cos':
-            C = cosine_similarity(X)
-        elif self.method == 'edu':
-            C = euclidean_dist(X)
-        else:
-            raise ValueError("Invalid method specified.")
-
-        n = C.shape[0] // 2
-        Nst = C[0:n, n:]  # Node matrix
-        M = Nst
-        M = minmax_normalize(M)
-        M = zscore_normalize(M)
-
-        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
-        P = P.squeeze(0)
-        P = column_normalize(P)
-
-        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
-        loss_total = loss + loss_ot
-
-        self.contrast.update(f_es, f_et, idx)
-
-        return loss_total, P, M

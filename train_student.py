@@ -26,7 +26,7 @@ from dataset.tinyimagenet import get_tiny_imagenet_dataloaders, get_tiny_imagene
 from helper.util import adjust_learning_rate
 
 from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, CEOTLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss
 from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
@@ -73,7 +73,7 @@ def parse_option():
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
                                                                       'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
-                                                                      'ot', 'ceot'])
+                                                                      'ot', 'ceot', 'gnnot'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -88,6 +88,14 @@ def parse_option():
     parser.add_argument('--ot_eps', type=float, default=1e-4, help='control the stopping condition for iterations')
     parser.add_argument('--ot_iter', type=int, default=200, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
+    parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
+
+
+    parser.add_argument('--device', type=str, default='cuda', help='')
+
+    # OT HKD
+    parser.add_argument('--hkd_weight', type=float, default=4, help='weight for hkd')
+    parser.add_argument('--ot_weight', type=float, default=1, help='weight for ot')
 
     # NCE distillation
     parser.add_argument('--feat_dim', default=128, type=int, help='feature dimension')
@@ -176,7 +184,7 @@ def main():
                 train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders_sample(batch_size=opt.batch_size,
                                                                                         num_workers=opt.num_workers,
                                                                                         k=opt.nce_k,
-                                                                                        mode='hkd')
+                                                                                        mode=opt.mode)
             else:
                 train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size,
                                                                                  num_workers=opt.num_workers)
@@ -207,23 +215,46 @@ def main():
     criterion_div = DistillKL(opt.kd_T)
 
     print('distill loss is:', opt.distill, '\n')
-    if opt.distill in ['ot', 'ceot']:
+
+    if opt.distill in ['ot', 'ceot', 'gnnot']:
         print('cost matrix method is: ', '\n',
               '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter, '-----')
 
     if opt.distill == 'kd':
         criterion_kd = DistillKL(opt.kd_T)
     elif opt.distill == 'ot':
-        criterion_kd = OTLoss(method=opt.ot_method, ot_gamma=opt.ot_gamma, ot_eps=opt.ot_eps, ot_iter=opt.ot_iter, device='cuda')
-    elif opt.distill == 'ceot':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
-        opt.n_data = n_data
-        criterion_kd = CEOTLoss(opt, method=opt.ot_method, ot_gamma=opt.ot_gamma, ot_eps=opt.ot_eps, ot_iter=opt.ot_iter, device='cuda')
+        criterion_kd = OTLoss(opt)
         module_list.append(criterion_kd.embed_s)
         module_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.embed_s)
         trainable_list.append(criterion_kd.embed_t)
+    elif opt.distill == 'ceot':
+        opt.s_dim = feat_s[-1].shape[1]
+        opt.t_dim = feat_t[-1].shape[1]
+        opt.n_data = n_data
+        criterion_kd = HKDOTLoss(opt)
+        module_list.append(criterion_kd.embed_s)
+        module_list.append(criterion_kd.embed_t)
+        module_list.append(criterion_kd.gnn_s)
+        module_list.append(criterion_kd.gnn_t)
+        trainable_list.append(criterion_kd.embed_s)
+        trainable_list.append(criterion_kd.embed_t)
+        trainable_list.append(criterion_kd.gnn_s)
+        trainable_list.append(criterion_kd.gnn_t)
+    elif opt.distill == 'gnnot':
+        opt.s_dim = feat_s[-1].shape[1]
+        opt.t_dim = feat_t[-1].shape[1]
+        criterion_kd = GNNOTLoss(opt)
+        module_list.append(criterion_kd.embed_s)
+        module_list.append(criterion_kd.embed_t)
+        module_list.append(criterion_kd.gnn_s)
+        module_list.append(criterion_kd.gnn_t)
+        trainable_list.append(criterion_kd.embed_s)
+        trainable_list.append(criterion_kd.embed_t)
+        trainable_list.append(criterion_kd.gnn_s)
+        trainable_list.append(criterion_kd.gnn_t)
     elif opt.distill == 'hint':
         criterion_kd = HintLoss()
         regress_s = ConvReg(feat_s[opt.hint_layer].shape, feat_t[opt.hint_layer].shape)

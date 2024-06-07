@@ -191,8 +191,8 @@ class GNNLoss(nn.Module):
         loss_g = self.criterion(out_gs) + self.criterion(out_gt)
         
         self.contrast.update(f_es, f_et, idx)
-        return loss + loss_g
-
+        # return # loss + loss_g
+        return loss_g
 
 class Encoder(nn.Module):
     def __init__(self, in_dim, hidden_dim):

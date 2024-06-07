@@ -1,10 +1,56 @@
 import torch
+from torch import nn
 import torch.nn.functional as F
 import ot
 import time
 
 
-# from helper import gromov_parameter
+class OTLoss(torch.nn.Module):
+
+    def __init__(self, opt):
+        super(OTLoss, self).__init__()
+        self.embed_s = Embed(opt.s_dim, opt.feat_dim)
+        self.embed_t = Embed(opt.t_dim, opt.feat_dim)
+        self.method = opt.ot_method
+        self.embed_type = opt.ot_embed
+        self.ot_gamma = opt.ot_gamma
+        self.ot_eps = opt.ot_eps
+        self.ot_iter = opt.ot_iter
+        self.device = opt.device
+
+    def forward(self, f_t, f_s):
+        # Concatenate teacher and student embeddings
+        if self.embed_type == 'use':
+            f_es = self.embed_s(f_s)
+            f_et = self.embed_t(f_t)
+            X = torch.cat((f_et, f_es), 0).to(self.device)
+        else:
+            X = torch.cat((f_t, f_s), 0).to(self.device)
+
+        if self.method == 'pcc':
+            C = PCC(X)
+        elif self.method == 'cos':
+            C = cosine_similarity(X)
+        elif self.method == 'edu':
+            C = euclidean_dist(X)
+        else:
+            raise ValueError("Invalid method specified.")
+
+        n = C.shape[0] // 2
+        Nst = C[0:n, n:]  # Node matrix
+
+        M = 1 - Nst
+        # M = minmax_normalize(M)
+        # M = zscore_normalize(M)
+        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
+        P = P.squeeze(0)
+        P = column_normalize(P)
+
+        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
+        # loss_ot = -torch.log(torch.diag(P)).mean()
+
+        return loss_ot, P, M
+
 
 def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000
 
@@ -32,6 +78,31 @@ def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=Fal
         P = P / beta.view(B, 1, W) * c
 
     return P
+
+
+class Embed(nn.Module):
+    """Embedding module"""
+    def __init__(self, dim_in=1024, dim_out=128):
+        super(Embed, self).__init__()
+        self.linear = nn.Linear(dim_in, dim_out)
+        self.l2norm = Normalize(2)
+
+    def forward(self, x):
+        x = x.view(x.shape[0], -1)
+        x = self.linear(x)
+        x = self.l2norm(x)
+        return x
+
+class Normalize(nn.Module):
+    """normalization layer"""
+    def __init__(self, power=2):
+        super(Normalize, self).__init__()
+        self.power = power
+
+    def forward(self, x):
+        norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
+        out = x.div(norm)
+        return out
 
 
 def PCC(m):
@@ -88,43 +159,3 @@ def doubly_normalize(P):
     P = row_normalize(P)
     P = column_normalize(P)
     return P
-
-
-class OTLoss(torch.nn.Module):
-
-    def __init__(self, method='pcc', ot_gamma=1, ot_eps=1e-6, ot_iter=20, device='cuda'):
-        super(OTLoss, self).__init__()
-        self.method = method
-        self.ot_gamma = ot_gamma
-        self.ot_eps = ot_eps
-        self.ot_iter = ot_iter
-        self.device = device
-
-    def forward(self, ft, fs):
-        # Concatenate teacher and student embeddings
-        X = torch.cat((ft, fs), 0).to(self.device)
-        if self.method == 'pcc':
-            C = PCC(X)
-        elif self.method == 'cos':
-            C = cosine_similarity(X)
-        elif self.method == 'edu':
-            C = euclidean_dist(X)
-        else:
-            raise ValueError("Invalid method specified.")
-
-        n = C.shape[0] // 2
-        Nst = C[0:n, n:]  # Node matrix
-
-        M = Nst
-        M = minmax_normalize(M)
-        M = zscore_normalize(M)
-
-        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
-        P = P.squeeze(0)
-        P = column_normalize(P)
-
-        loss_node = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
-
-        GM_loss = loss_node
-
-        return GM_loss, P, M

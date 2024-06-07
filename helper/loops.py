@@ -94,6 +94,8 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     losses_cls = AverageMeter()
     losses_kd = AverageMeter()
     losses_div = AverageMeter() if opt.alpha > 0 else None
+    losses_hkd = AverageMeter() if opt.node_weight > 0 else None
+    losses_ot = AverageMeter() if opt.edge_weight > 0 else None
 
 
     top1 = AverageMeter()
@@ -155,7 +157,15 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         elif opt.distill == 'ceot':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
-            loss_kd, P, M = criterion_kd(epoch, f_s, f_t, index, contrast_idx)
+            loss_kd, loss_hkd, loss_ot, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t, index, contrast_idx)
+            if losses_hkd is not None:
+                losses_hkd.update(loss_hkd.item(), input.size(0))
+            if losses_ot is not None:
+                losses_ot.update(loss_ot.item(), input.size(0))
+        elif opt.distill == 'gnnot':
+            f_s = feat_s[-1]
+            f_t = feat_t[-1]
+            loss_kd, loss_g, Pg, Mg, loss_e, Pe, Me = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
         elif opt.distill == 'attention':
             g_s = feat_s[1:-1]
             g_t = feat_t[1:-1]
@@ -209,11 +219,14 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         loss = opt.gamma * loss_cls + opt.alpha * loss_div + opt.beta * loss_kd
 
         acc1, acc5 = accuracy(logit_s, target, topk=(1, 5))
+
         losses.update(loss.item(), input.size(0))
         losses_cls.update(loss_cls.item(), input.size(0))
         losses_kd.update(loss_kd.item(), input.size(0))
+
         if losses_div is not None:
             losses_div.update(loss_div.item(), input.size(0))
+
         top1.update(acc1[0], input.size(0))
         top5.update(acc5[0], input.size(0))
 
@@ -271,6 +284,10 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
     if losses_div is not None:
         log_data["Train/Loss_Div"] = losses_div.avg
+    if losses_hkd is not None:
+        log_data["Train/Loss_hkd"] = losses_hkd.avg
+    if losses_ot is not None:
+        log_data["Train/Loss_ot"] = losses_ot.avg
 
     wandb.log(log_data)
 

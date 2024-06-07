@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 import ot
 import time
 from helper import gromov_parameter
