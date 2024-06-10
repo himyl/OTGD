@@ -25,16 +25,17 @@ class GNNOTLoss(nn.Module):
         self.loss_ot = OTLoss(opt)
         self.device = opt.device
 
+
     def forward(self, epoch, f_s, l_s, f_t, l_t):
         batchSize = f_s.size(0)
 
         # graph independent part
         f_es = self.embed_s(f_s)
         f_et = self.embed_t(f_t)
-        loss_e, Pe, Me = self.loss_ot(f_et, f_es)
+        loss_e, P, M = self.loss_ot(f_et, f_es)
 
         if batchSize < knn:
-            return loss_e, Pe, Me
+            return loss_e, P, M
 
         # graph nn
         G_pos_s = knn_graph(l_s.detach(), knn).to(self.device)
@@ -45,10 +46,10 @@ class GNNOTLoss(nn.Module):
         G_pos_t.ndata['h'] = f_et
         f_gt = self.gnn_t(G_pos_t)
 
-        loss_g, Pg, Mg = self.loss_ot(f_gt, f_gs)
+        loss_g, P, M = self.loss_ot(f_gt, f_gs)
         loss = loss_g + loss_e
 
-        return loss, loss_g, Pg, Mg, loss_e, Pe, Me
+        return loss, P, M
 
 
 class OTLoss(torch.nn.Module):
@@ -61,6 +62,7 @@ class OTLoss(torch.nn.Module):
         self.ot_eps = opt.ot_eps
         self.ot_iter = opt.ot_iter
         self.device = opt.device
+        print("Initialized OTLoss with method: ", self.method)
 
     def forward(self, ft, fs):
         X = torch.cat((ft, fs), 0).to(self.device)
@@ -75,14 +77,18 @@ class OTLoss(torch.nn.Module):
         Nst = C[0:n, n:]
 
         M = 1 - Nst
-        # M = minmax_normalize(M)
-        # M = zscore_normalize(M)
+        M = minmax_normalize(M)
+        M = zscore_normalize(M)
+
         P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
         P = P.squeeze(0)
-        P = column_normalize(P)
 
-        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
-        # loss_ot = -torch.log(torch.diag(P)).mean()
+        # P = row_normalize(P)
+        P = column_normalize(P)
+        # P = doubly_normalize(P)
+
+        # loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
+        loss_ot = -torch.log(torch.diag(P)).mean()
         return loss_ot, P, M
 
 

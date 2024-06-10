@@ -15,3 +15,4 @@ from .GNN import GNNLoss
 from .OT import OTLoss
 from .CEOT import HKDOTLoss
 from .GNNOT import GNNOTLoss
+from .GNNGW import GNNGWLoss

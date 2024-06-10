@@ -94,8 +94,8 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     losses_cls = AverageMeter()
     losses_kd = AverageMeter()
     losses_div = AverageMeter() if opt.alpha > 0 else None
-    losses_hkd = AverageMeter() if opt.node_weight > 0 else None
-    losses_ot = AverageMeter() if opt.edge_weight > 0 else None
+    losses_hkd = AverageMeter() if opt.hkd_weight > 0 else None
+    losses_ot = AverageMeter() if opt.ot_weight > 0 else None
 
 
     top1 = AverageMeter()
@@ -165,7 +165,11 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         elif opt.distill == 'gnnot':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
-            loss_kd, loss_g, Pg, Mg, loss_e, Pe, Me = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+            loss_kd, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+        elif opt.distill == 'gnngw':
+            f_s = feat_s[-1]
+            f_t = feat_t[-1]
+            loss_kd, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
         elif opt.distill == 'attention':
             g_s = feat_s[1:-1]
             g_t = feat_t[1:-1]

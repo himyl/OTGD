@@ -15,7 +15,6 @@ import torch.optim as optim
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
-
 from models import model_dict
 from models.util import Embed, ConvReg, LinearEmbed
 from models.util import Connector, Translator, Paraphraser
@@ -26,7 +25,7 @@ from dataset.tinyimagenet import get_tiny_imagenet_dataloaders, get_tiny_imagene
 from helper.util import adjust_learning_rate
 
 from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss
 from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
@@ -36,7 +35,6 @@ import wandb
 
 
 def parse_option():
-
     hostname = socket.gethostname()
 
     parser = argparse.ArgumentParser('argument for training')
@@ -73,7 +71,7 @@ def parse_option():
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
                                                                       'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
-                                                                      'ot', 'ceot', 'gnnot'])
+                                                                      'ot', 'ceot', 'gnnot', 'gnngw'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -85,16 +83,21 @@ def parse_option():
 
     # OT para for node loss
     parser.add_argument('--ot_gamma', type=float, default=1, help='strength of entropy regularization')
-    parser.add_argument('--ot_eps', type=float, default=1e-4, help='control the stopping condition for iterations')
-    parser.add_argument('--ot_iter', type=int, default=200, help='the maximum number of iterations')
+    parser.add_argument('--ot_eps', type=float, default=1e-5, help='control the stopping condition for iterations')
+    parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
     parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
 
-
     parser.add_argument('--device', type=str, default='cuda', help='')
 
+    # GW para for edge loss
+    parser.add_argument('--gw_tol', type=float, default=1e-6, help='Tolerance for solution precision')
+    parser.add_argument('--gw_reg', type=float, default=1.0, help='entropic regularization weight')
+    parser.add_argument('--gw_iter', type=int, default=10, help='Maximum number of iterations')
+
+
     # OT HKD
-    parser.add_argument('--hkd_weight', type=float, default=4, help='weight for hkd')
+    parser.add_argument('--hkd_weight', type=float, default=1, help='weight for hkd')
     parser.add_argument('--ot_weight', type=float, default=1, help='weight for ot')
 
     # NCE distillation
@@ -167,8 +170,6 @@ def main():
 
     best_acc = 0
 
-    opt = parse_option()
-
     # tensorboard logger
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
 
@@ -217,8 +218,11 @@ def main():
     print('distill loss is:', opt.distill, '\n')
 
     if opt.distill in ['ot', 'ceot', 'gnnot']:
-        print('cost matrix method is: ', '\n',
-              '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter, '-----')
+        print('cost matrix method is: ',  opt.ot_method, '\n',
+              '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter,
+              ', use_embed: ', opt.ot_embed, '-----')
+    if opt.distill in ['ceot']:
+        print('\n', 'hkd weight is: ', opt.hkd_weight, ' ot weight is: ', opt.ot_weight)
 
     if opt.distill == 'kd':
         criterion_kd = DistillKL(opt.kd_T)
@@ -247,6 +251,18 @@ def main():
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
         criterion_kd = GNNOTLoss(opt)
+        module_list.append(criterion_kd.embed_s)
+        module_list.append(criterion_kd.embed_t)
+        module_list.append(criterion_kd.gnn_s)
+        module_list.append(criterion_kd.gnn_t)
+        trainable_list.append(criterion_kd.embed_s)
+        trainable_list.append(criterion_kd.embed_t)
+        trainable_list.append(criterion_kd.gnn_s)
+        trainable_list.append(criterion_kd.gnn_t)
+    elif opt.distill == 'gnngw':
+        opt.s_dim = feat_s[-1].shape[1]
+        opt.t_dim = feat_t[-1].shape[1]
+        criterion_kd = GNNGWLoss(opt)
         module_list.append(criterion_kd.embed_s)
         module_list.append(criterion_kd.embed_t)
         module_list.append(criterion_kd.gnn_s)
@@ -351,9 +367,9 @@ def main():
         raise NotImplementedError(opt.distill)
 
     criterion_list = nn.ModuleList([])
-    criterion_list.append(criterion_cls)    # classification loss
-    criterion_list.append(criterion_div)    # KL divergence loss, original knowledge distillation
-    criterion_list.append(criterion_kd)     # other knowledge distillation loss
+    criterion_list.append(criterion_cls)  # classification loss
+    criterion_list.append(criterion_div)  # KL divergence loss, original knowledge distillation
+    criterion_list.append(criterion_kd)  # other knowledge distillation loss
 
     # optimizer
     optimizer = optim.SGD(trainable_list.parameters(),

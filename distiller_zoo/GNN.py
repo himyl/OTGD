@@ -160,7 +160,7 @@ class GNNLoss(nn.Module):
 
         if batchSize < knn:
             return loss
-        
+
         # graph nn
         G_pos_s = knn_graph(l_s.detach(), knn)
         G_pos_s = G_pos_s.to('cuda:0')
