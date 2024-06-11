@@ -13,6 +13,8 @@ eps = 1e-7
 knn = 8
 
 """ HKD method without InfoNCE estimator + OT loss"""
+
+
 class GNNGWLoss(nn.Module):
     def __init__(self, opt):
         super(GNNGWLoss, self).__init__()
@@ -28,7 +30,6 @@ class GNNGWLoss(nn.Module):
         self.gw_tol = opt.gw_tol
         self.loss_ot = OTLoss(opt)
         self.device = opt.device
-
 
     def forward(self, epoch, f_s, l_s, f_t, l_t):
         batchSize = f_s.size(0)
@@ -69,7 +70,9 @@ class OTLoss(torch.nn.Module):
         self.ot_eps = opt.ot_eps
         self.ot_iter = opt.ot_iter
         self.device = opt.device
-        print("Initialized OTLoss with method: ", self.method)
+        self.M_norm = opt.M_norm
+        self.P_norm = opt.P_norm
+
 
     def forward(self, ft, fs):
         X = torch.cat((ft, fs), 0).to(self.device)
@@ -84,15 +87,23 @@ class OTLoss(torch.nn.Module):
         Nst = C[0:n, n:]
 
         M = 1 - Nst
-        M = minmax_normalize(M)
-        M = zscore_normalize(M)
+
+        if self.M_norm == 'Mm':
+            M = minmax_normalize(M)
+        elif self.M_norm == 'Mz':
+            M = zscore_normalize(M)
+        elif self.M_norm == 'Mmz':
+            M = mmzs_normalize(M)
 
         P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
         P = P.squeeze(0)
 
-        # P = row_normalize(P)
-        P = column_normalize(P)
-        # P = doubly_normalize(P)
+        if self.P_norm == 'Pr':
+            P = row_normalize(P)
+        elif self.P_norm == 'Pc':
+            P = column_normalize(P)
+        elif self.P_norm == 'Prc':
+            P = doubly_normalize(P)
 
         # loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
         loss_ot = -torch.log(torch.diag(P)).mean()
@@ -164,6 +175,12 @@ def zscore_normalize(C):
     mean = C.mean()
     std = C.std()
     return (C - mean) / std
+
+
+def mmzs_normalize(C):
+    C = minmax_normalize(C)
+    C = zscore_normalize(C)
+    return C
 
 
 def row_normalize(P):

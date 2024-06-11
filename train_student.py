@@ -85,8 +85,11 @@ def parse_option():
     parser.add_argument('--ot_gamma', type=float, default=1, help='strength of entropy regularization')
     parser.add_argument('--ot_eps', type=float, default=1e-5, help='control the stopping condition for iterations')
     parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
+    parser.add_argument('--ot_reg', type=float, default=0.1, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
     parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
+    parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
+    parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', None])
 
     parser.add_argument('--device', type=str, default='cuda', help='')
 
@@ -198,6 +201,7 @@ def main():
         raise NotImplementedError(opt.dataset)
 
     # model
+    print('student network is:', opt.model_s)
     model_t = load_teacher(opt.path_t, n_cls)
     model_s = model_dict[opt.model_s](num_classes=n_cls)
 
