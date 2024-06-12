@@ -9,19 +9,15 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 
+def get_data_folder():
+    data_folder = './data/'
+
+    if not os.path.isdir(data_folder):
+        os.makedirs(data_folder)
+
+    return data_folder
+
 class TinyImageNet(VisionDataset):
-    """`tiny-imageNet <http://cs231n.stanford.edu/tiny-imagenet-200.zip>`_ Dataset.
-        Args:
-            root (string): Root directory of the dataset.
-            split (string, optional): The dataset split, supports ``train``, or ``val``.
-            transform (callable, optional): A function/transform that  takes in an PIL image
-               and returns a transformed version. E.g, ``transforms.RandomCrop``
-            target_transform (callable, optional): A function/transform that takes in the
-               target and transforms it.
-            download (bool, optional): If true, downloads the dataset from the internet and
-               puts it in root directory. If dataset is already downloaded, it is not
-               downloaded again.
-    """
     base_folder = 'tiny-imagenet-200/'
     url = 'http://cs231n.stanford.edu/tiny-imagenet-200.zip'
     filename = 'tiny-imagenet-200.zip'
@@ -100,6 +96,9 @@ def make_dataset(root, base_folder, dirname, class_to_idx):
         imgs_path = os.path.join(dir_path, 'images')
         imgs_annotations = os.path.join(dir_path, 'val_annotations.txt')
 
+        if not os.path.isfile(imgs_annotations):
+            raise FileNotFoundError(f"Validation annotations file not found at {imgs_annotations}")
+
         with open(imgs_annotations) as r:
             data_info = map(lambda s: s.split('\t'), r.readlines())
 
@@ -137,12 +136,14 @@ def get_tiny_imagenet_dataloaders(batch_size=128, num_workers=8, isinstance=True
         transforms.ToTensor()
     ])
 
-    if isinstance:
-        train_dataset = TinyImageNetInstance('/disk/wyc/tiny-imagenet', split='train', transform=train_transform)
-    else:
-        train_dataset = TinyImageNet('/disk/wyc/tiny-imagenet', split='train', transform=train_transform)
+    data_folder = get_data_folder()
 
-    test_dataset = TinyImageNet('/disk/wyc/tiny-imagenet', split='val', transform=test_transform)
+    if isinstance:
+        train_dataset = TinyImageNetInstance(root=data_folder, split='train', transform=train_transform)
+    else:
+        train_dataset = TinyImageNet(root=data_folder, split='train', transform=train_transform)
+
+    test_dataset = TinyImageNet(root=data_folder, split='val', transform=test_transform)
 
     n_data = len(train_dataset)
 
@@ -187,16 +188,23 @@ class TinyImageNetInstanceSample(TinyImageNet):
                     continue
                 self.cls_negative[i].extend(self.cls_positive[j])
 
-        self.cls_positive = [np.asarray(self.cls_positive[i]) for i in range(num_classes)]
-        self.cls_negative = [np.asarray(self.cls_negative[i]) for i in range(num_classes)]
+        self.cls_positive = [np.asarray(self.cls_positive[i], dtype=np.int32) for i in range(num_classes)]
+        self.cls_negative = [np.asarray(self.cls_negative[i], dtype=np.int32) for i in range(num_classes)]
+        # self.cls_positive = [np.asarray(self.cls_positive[i], dtype=object) for i in range(num_classes)]
+        # self.cls_negative = [np.asarray(self.cls_negative[i], dtype=object) for i in range(num_classes)]
+        # self.cls_positive = [np.asarray(self.cls_positive[i]) for i in range(num_classes)]
+        # self.cls_negative = [np.asarray(self.cls_negative[i]) for i in range(num_classes)]
 
         if 0 < percent < 1:
             n = int(len(self.cls_negative[0]) * percent)
             self.cls_negative = [np.random.permutation(self.cls_negative[i])[0:n]
                                  for i in range(num_classes)]
 
-        self.cls_positive = np.asarray(self.cls_positive)
-        self.cls_negative = np.asarray(self.cls_negative)
+        self.cls_positive = np.asarray(self.cls_positive, dtype=np.int32)
+        self.cls_negative = np.asarray(self.cls_negative, dtype=np.int32)
+
+        # self.cls_positive = np.asarray(self.cls_positive)
+        # self.cls_negative = np.asarray(self.cls_negative)
 
     def __getitem__(self, index):
         img_path, target = self.data[index]
@@ -240,9 +248,11 @@ def get_tiny_imagenet_dataloaders_sample(batch_size=128, num_workers=8, k=4096, 
         transforms.ToTensor()
     ])
 
-    train_dataset = TinyImageNetInstanceSample('/disk/wyc/tiny-imagenet', split='train', transform=train_transform, k=k,
-                                               mode=mode, is_sample=is_sample, percent=percent)
-    test_dataset = TinyImageNet('/disk/wyc/tiny-imagenet', split='val', transform=test_transform)
+    data_folder = get_data_folder()
+
+    train_dataset = TinyImageNetInstanceSample(root=data_folder, split='train', transform=train_transform, k=k,
+                                               mode=mode, is_sample=is_sample, percent=percent, download=True)
+    test_dataset = TinyImageNet(root=data_folder, split='val', transform=test_transform, download=True)
 
     n_data = len(train_dataset)
 

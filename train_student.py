@@ -57,7 +57,8 @@ def parse_option():
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100'], help='dataset')
+    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny-imagenet'],
+                        help='dataset')
 
     # model
     parser.add_argument('--model_s', type=str, default='resnet8',
@@ -97,7 +98,6 @@ def parse_option():
     parser.add_argument('--gw_tol', type=float, default=1e-6, help='Tolerance for solution precision')
     parser.add_argument('--gw_reg', type=float, default=1.0, help='entropic regularization weight')
     parser.add_argument('--gw_iter', type=int, default=10, help='Maximum number of iterations')
-
 
     # OT HKD
     parser.add_argument('--hkd_weight', type=float, default=1, help='weight for hkd')
@@ -161,7 +161,11 @@ def load_teacher(model_path, n_cls):
     print('==> loading teacher model')
     model_t = get_teacher_name(model_path)
     model = model_dict[model_t](num_classes=n_cls)
-    model.load_state_dict(torch.load(model_path)['model'])
+    if torch.cuda.is_available():
+        map_location = 'cuda'
+    else:
+        map_location = 'cpu'
+    model.load_state_dict(torch.load(model_path, map_location=map_location)['model'])
     print('==> done')
     return model
 
@@ -183,20 +187,21 @@ def main():
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
                                                                                mode=opt.mode)
-        elif opt.dataset == 'tiny-imagenet':
-            if opt.distill in ['hkd']:
-                train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders_sample(batch_size=opt.batch_size,
-                                                                                        num_workers=opt.num_workers,
-                                                                                        k=opt.nce_k,
-                                                                                        mode=opt.mode)
-            else:
-                train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size,
-                                                                                 num_workers=opt.num_workers)
         else:
             train_loader, val_loader, n_data = get_cifar100_dataloaders(batch_size=opt.batch_size,
                                                                         num_workers=opt.num_workers,
                                                                         is_instance=True)
         n_cls = 100
+    elif opt.dataset == 'tiny-imagenet':
+        if opt.distill in ['crd', 'hkd', 'ceot']:
+            train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders_sample(batch_size=opt.batch_size,
+                                                                                    num_workers=opt.num_workers,
+                                                                                    k=opt.nce_k,
+                                                                                    mode=opt.mode)
+        else:
+            train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size,
+                                                                             num_workers=opt.num_workers)
+        n_cls = 200
     else:
         raise NotImplementedError(opt.dataset)
 
@@ -206,6 +211,11 @@ def main():
     model_s = model_dict[opt.model_s](num_classes=n_cls)
 
     data = torch.randn(2, 3, 32, 32)
+    # if opt.dataset == 'cifar100':
+    #     data = torch.randn(2, 3, 32, 32)
+    # elif opt.dataset == 'tiny-imagenet':
+    #     data = torch.randn(2, 3, 64, 64)
+
     model_t.eval()
     model_s.eval()
     feat_t, _ = model_t(data, is_feat=True)
@@ -222,7 +232,7 @@ def main():
     print('distill loss is:', opt.distill, '\n')
 
     if opt.distill in ['ot', 'ceot', 'gnnot']:
-        print('cost matrix method is: ',  opt.ot_method, '\n',
+        print('cost matrix method is: ', opt.ot_method, '\n',
               '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter,
               ', use_embed: ', opt.ot_embed, '-----')
     if opt.distill in ['ceot']:
