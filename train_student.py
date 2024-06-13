@@ -57,7 +57,7 @@ def parse_option():
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny-imagenet'],
+    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny_imagenet'],
                         help='dataset')
 
     # model
@@ -72,7 +72,7 @@ def parse_option():
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
                                                                       'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
-                                                                      'ot', 'ceot', 'gnnot', 'gnngw'])
+                                                                      'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -191,8 +191,7 @@ def main():
             train_loader, val_loader, n_data = get_cifar100_dataloaders(batch_size=opt.batch_size,
                                                                         num_workers=opt.num_workers,
                                                                         is_instance=True)
-        n_cls = 100
-    elif opt.dataset == 'tiny-imagenet':
+    elif opt.dataset == 'tiny_imagenet':
         if opt.distill in ['crd', 'hkd', 'ceot']:
             train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders_sample(batch_size=opt.batch_size,
                                                                                     num_workers=opt.num_workers,
@@ -201,9 +200,16 @@ def main():
         else:
             train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size,
                                                                              num_workers=opt.num_workers)
-        n_cls = 200
     else:
         raise NotImplementedError(opt.dataset)
+
+    class_num_map = {
+        'cifar100': 100,
+        'tiny_imagenet': 200
+    }
+    if opt.dataset not in class_num_map:
+        raise NotImplementedError(opt.dataset)
+    n_cls = class_num_map[opt.dataset]
 
     # model
     print('student network is:', opt.model_s)
@@ -274,6 +280,18 @@ def main():
         trainable_list.append(criterion_kd.gnn_s)
         trainable_list.append(criterion_kd.gnn_t)
     elif opt.distill == 'gnngw':
+        opt.s_dim = feat_s[-1].shape[1]
+        opt.t_dim = feat_t[-1].shape[1]
+        criterion_kd = GNNGWLoss(opt)
+        module_list.append(criterion_kd.embed_s)
+        module_list.append(criterion_kd.embed_t)
+        module_list.append(criterion_kd.gnn_s)
+        module_list.append(criterion_kd.gnn_t)
+        trainable_list.append(criterion_kd.embed_s)
+        trainable_list.append(criterion_kd.embed_t)
+        trainable_list.append(criterion_kd.gnn_s)
+        trainable_list.append(criterion_kd.gnn_t)
+    elif opt.distill == 'mixgnn':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
         criterion_kd = GNNGWLoss(opt)

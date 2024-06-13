@@ -23,7 +23,7 @@ class TinyImageNet(VisionDataset):
     filename = 'tiny-imagenet-200.zip'
     md5 = '90528d7ca1a48142e341f4ef8d21d0de'
 
-    def __init__(self, root, split='train', transform=None, target_transform=None, download=False):
+    def __init__(self, root, split='train', transform=None, target_transform=None, download=True):
         super(TinyImageNet, self).__init__(root, transform=transform, target_transform=target_transform)
 
         self.dataset_path = os.path.join(root, self.base_folder)

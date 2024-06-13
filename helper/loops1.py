@@ -67,7 +67,7 @@ def train_vanilla(epoch, train_loader, model, criterion, optimizer, opt):
     return top1.avg, losses.avg
 
 
-def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, opt):
+def train_distill(epoch, train_loader, module_list, mlp_net, cos_value, criterion_list, optimizer, opt):
     """One epoch distillation"""
     # set modules as train()
     for module in module_list:
@@ -96,10 +96,13 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     losses_div = AverageMeter() if opt.alpha > 0 else None
     losses_hkd = AverageMeter() if opt.hkd_weight > 0 else None
     losses_ot = AverageMeter() if opt.ot_weight > 0 else None
+    loss_kl = AverageMeter()
 
 
     top1 = AverageMeter()
     top5 = AverageMeter()
+
+    n_batch = len(train_loader)
 
     M = None
     P = None
@@ -129,9 +132,16 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             feat_t, logit_t = model_t(input, is_feat=True, preact=preact)
             feat_t = [f.detach() for f in feat_t]
 
+        if opt.have_mlp:
+            temp = mlp_net(logit_t, logit_s, cos_value)  # (teacher_output, student_output)
+            temp = opt.t_start + opt.t_end * torch.sigmoid(temp)
+            temp = temp.cuda()
+        else:
+            temp = (opt.kd_T * torch.ones(1)).cuda()
+
         # cls + kl div
         loss_cls = criterion_cls(logit_s, target)
-        loss_div = criterion_div(logit_s, logit_t)
+        loss_div = criterion_div(logit_s, logit_t, temp)
         # Initialize loss_kd as a zero tensor
         loss_kd = torch.tensor(0.0, device=input.device)
 
@@ -226,6 +236,8 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
         loss = opt.gamma * loss_cls + opt.alpha * loss_div + opt.beta * loss_kd
 
+        loss_kl.update(loss_div.item(), input.size(0))
+
         acc1, acc5 = accuracy(logit_s, target, topk=(1, 5))
 
         losses.update(loss.item(), input.size(0))
@@ -255,7 +267,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, idx, len(train_loader), batch_time=batch_time,
+                epoch, idx, n_batch, batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=top1, top5=top5))
             sys.stdout.flush()
 
@@ -302,7 +314,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
           .format(top1=top1, top5=top5))
 
-    return top1.avg, losses.avg
+    return top1.avg, top5.avg, losses.avg, temp
 
 
 def validate(val_loader, model, criterion, opt):
@@ -314,6 +326,8 @@ def validate(val_loader, model, criterion, opt):
 
     # switch to evaluate mode
     model.eval()
+
+    n_batch = len(val_loader)
 
     with torch.no_grad():
         end = time.time()
@@ -344,7 +358,7 @@ def validate(val_loader, model, criterion, opt):
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                       'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                       idx, len(val_loader), batch_time=batch_time, loss=losses,
+                       idx, n_batch, batch_time=batch_time, loss=losses,
                        top1=top1, top5=top5))
         log_data = {
             "Test/Loss": losses.avg,

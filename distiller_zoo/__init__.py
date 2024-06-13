@@ -16,3 +16,4 @@ from .OT import OTLoss
 from .CEOT import HKDOTLoss
 from .GNNOT import GNNOTLoss
 from .GNNGW import GNNGWLoss
+from .MIXGNN import MIXGNNLoss
