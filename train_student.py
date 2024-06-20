@@ -89,11 +89,9 @@ def parse_option():
     parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
     parser.add_argument('--ot_reg', type=float, default=0, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
-    parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
     parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
     parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', 'SC', None])
     parser.add_argument('--tau', type=float, default=0.1, help=' ')
-
     parser.add_argument('--device', type=str, default='cuda', help='')
 
     # GW para for edge loss
@@ -243,10 +241,9 @@ def main():
 
     print('distill loss is:', opt.distill, '\n')
 
-    if opt.distill in ['ot', 'ceot', 'gnnot']:
+    if opt.distill in ['ot', 'ceot', 'gnnot', 'gnngw']:
         print('cost matrix method is: ', opt.ot_method, '\n',
-              '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter,
-              ', use_embed: ', opt.ot_embed, '-----')
+              '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter, '-----')
     if opt.distill in ['ceot']:
         print('\n', 'hkd weight is: ', opt.hkd_weight, ' ot weight is: ', opt.ot_weight)
 
