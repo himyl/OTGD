@@ -28,7 +28,8 @@ from dataset.tinyimagenet import get_tiny_imagenet_dataloaders, get_tiny_imagene
 from helper.util import adjust_learning_rate
 from helper.util import save_dict_to_json
 
-from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
+from distiller_zoo import HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
+from distiller_zoo.KD1 import DistillKL, DistillKL_logit_stand
 from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss
 from crd.criterion import CRDLoss
 
@@ -90,7 +91,7 @@ def parse_option():
     parser.add_argument('--ot_gamma', type=float, default=1, help='strength of entropy regularization')
     parser.add_argument('--ot_eps', type=float, default=1e-5, help='control the stopping condition for iterations')
     parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
-    parser.add_argument('--ot_reg', type=float, default=0.1, help='the maximum number of iterations')
+    parser.add_argument('--ot_reg', type=float, default=0, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
     parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
     parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
@@ -113,6 +114,8 @@ def parse_option():
     parser.add_argument('--nce_k', default=16384, type=int, help='number of negative samples for NCE')
     parser.add_argument('--nce_t', default=0.07, type=float, help='temperature parameter for softmax')
     parser.add_argument('--nce_m', default=0.5, type=float, help='momentum for non-parametric updates')
+
+    parser.add_argument('--logit_stand', action='store_true')
 
     # CTKD distillation
     parser.add_argument('--have_mlp', type=int, default=0)
@@ -296,7 +299,7 @@ def main():
     trainable_list.append(mlp)
 
     criterion_cls = nn.CrossEntropyLoss()
-    criterion_div = DistillKL(opt.kd_T)
+    criterion_div = DistillKL() if opt.logit_stand else DistillKL_logit_stand()
 
     print('distill loss is:', opt.distill, '\n')
 

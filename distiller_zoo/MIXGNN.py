@@ -6,7 +6,7 @@ import dgl
 import dgl.backend as B
 from dgl import DGLGraph
 from scipy import sparse
-from dgl.nn.pytorch import TAGConv
+from dgl.nn.pytorch import TAGConv, SAGEConv, GraphConv
 
 eps = 1e-7
 knn = 8
@@ -47,12 +47,14 @@ class MIXGNNLoss(nn.Module):
         G_pos_t.ndata['h'] = f_et
         f_gt = self.gnn_t(G_pos_t)
 
-        loss_eg, P, M = self.loss_ot(f_et, f_gs)
-        loss_ge, P, M = self.loss_ot(f_gt, f_es)
+        loss_g, P, M = self.loss_ot(f_gt, f_gs)
+        loss = loss_g + loss_e
 
-        loss = loss_eg + loss_ge + loss_e
+        # loss_eg, P, M = self.loss_ot(f_et, f_gs)
+        # loss_ge, P, M = self.loss_ot(f_gt, f_es)
+        # loss = loss_eg + loss_ge + loss_e
 
-        return loss, P, M
+        return loss, loss_e, loss_g, P, M
 
 
 class OTLoss(torch.nn.Module):
@@ -234,7 +236,9 @@ def knn_graph(x, k):
 class Encoder(nn.Module):
     def __init__(self, in_dim, hidden_dim):
         super(Encoder, self).__init__()
-        self.conv1 = TAGConv(in_dim, hidden_dim, k=1)
+        # self.conv1 = TAGConv(in_dim, hidden_dim, k=1)
+        # self.conv1 = GraphConv(in_dim, hidden_dim)
+        self.conv1 = SAGEConv(in_dim, hidden_dim, aggregator_type='mean')  # 使用GraphSAGE卷积层
         self.l2norm = Normalize(2)
 
     def forward(self, g):

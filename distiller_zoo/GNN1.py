@@ -1,37 +1,36 @@
+from __future__ import print_function
+
 import torch
 from torch import nn
 import math
-import torch.nn.functional as F
-import dgl
-import dgl.backend as B
 from dgl import DGLGraph
 from scipy import sparse
 from dgl.nn.pytorch import TAGConv
+import torch.nn.functional as F
+import dgl.backend as B
+import dgl.function as fn
+import dgl
+import numpy as np
+from dgl.nn.pytorch import SAGEConv, GATConv, GraphConv, GINConv
 
 eps = 1e-7
 knn = 8
 
-""" HKD method directly add OT method """
 
-
-class HKDOTLoss(nn.Module):
+class GNNLoss(nn.Module):
     def __init__(self, opt):
-        super(HKDOTLoss, self).__init__()
+        super(GNNLoss, self).__init__()
         self.embed_s = Embed(opt.s_dim, opt.feat_dim)
         self.embed_t = Embed(opt.t_dim, opt.feat_dim)
         self.gnn_s = Encoder(opt.feat_dim, opt.feat_dim)
         self.gnn_t = Encoder(opt.feat_dim, opt.feat_dim)
-        self.contrast = NCEAverage(opt.feat_dim, opt.n_data, opt.nce_k).to(opt.device)
+        self.contrast = NCEAverage(opt.feat_dim, opt.n_data, opt.nce_k).cuda()
         self.criterion = NCESoftmaxLoss()
         self.feat_size = opt.feat_dim
-        self.loss_ot = OTLoss(opt)
-        self.hkd_weight = opt.hkd_weight
-        self.ot_weight = opt.ot_weight
-
 
         u = torch.tensor([i for i in range(opt.batch_size * opt.nce_k)]).cuda()
         v = torch.tensor([i for i in range(opt.batch_size * opt.nce_k)]).cuda()
-        self.G_neg = dgl.graph((u, v)).to(self.device)
+        self.G_neg = dgl.graph((u, v)).to('cuda:0')
 
     def forward(self, epoch, f_s, l_s, f_t, l_t, idx, contrast_idx=None):
         batchSize = f_s.size(0)
@@ -40,7 +39,7 @@ class HKDOTLoss(nn.Module):
 
         weight_t, weight_s = self.contrast(batchSize, idx, contrast_idx)
 
-        # graph independent part
+        # graph indepandent
         f_es = self.embed_s(f_s)
         f_et = self.embed_t(f_t)
         f_us, f_ut = self.contrast.get_pos(idx)
@@ -64,11 +63,13 @@ class HKDOTLoss(nn.Module):
             return loss
 
         # graph nn
-        G_pos_s = knn_graph(l_s.detach(), knn).to(self.device)
+        G_pos_s = knn_graph(l_s.detach(), knn)
+        G_pos_s = G_pos_s.to('cuda:0')
         G_pos_s.ndata['h'] = f_es
         f_gs = self.gnn_s(G_pos_s)
 
-        G_pos_t = knn_graph(l_t.detach(), knn).to(self.device)
+        G_pos_t = knn_graph(l_t.detach(), knn)
+        G_pos_t = G_pos_t.to('cuda:0')
         G_pos_t.ndata['h'] = f_et
         f_gt = self.gnn_t(G_pos_t)
 
@@ -89,171 +90,15 @@ class HKDOTLoss(nn.Module):
         out_gt = out_gt.contiguous()
 
         loss_g = self.criterion(out_gs) + self.criterion(out_gt)
+
         self.contrast.update(f_es, f_et, idx)
-
-        loss_ot, P, M = self.loss_ot(f_et, f_es)
-
-        loss_tol = self.hkd_weight * (loss + loss_g) + self.ot_weight * loss_ot
-
-        # return loss_e, loss, loss_ot, P, M
-        return loss_tol, loss + loss_g, loss_ot, P, M
-
-
-class OTLoss(torch.nn.Module):
-    def __init__(self, opt):
-        super(OTLoss, self).__init__()
-        self.embed_s = Embed(opt.s_dim, opt.feat_dim)
-        self.embed_t = Embed(opt.t_dim, opt.feat_dim)
-        self.method = opt.ot_method
-        self.ot_gamma = opt.ot_gamma
-        self.ot_eps = opt.ot_eps
-        self.ot_iter = opt.ot_iter
-        self.device = opt.device
-        self.M_norm = opt.M_norm
-        self.P_norm = opt.P_norm
-        self.tau = opt.tau
-
-    def forward(self, ft, fs):
-        X = torch.cat((ft, fs), 0).to(self.device)
-        C = self.compute_similarity(X)
-        n = C.shape[0] // 2
-        M = 1 - C[0:n, n:]
-
-        M = self.normalize_M(M)
-        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
-        P = self.normalize_P(P)
-
-        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
-        return loss_ot, P, M
-
-    def compute_similarity(self, X):
-        if self.method == 'pcc':
-            return PCC(X)
-        elif self.method == 'cos':
-            return cosine_similarity(X)
-        raise ValueError("Invalid method specified.")
-
-    def normalize_M(self, M):
-        if self.M_norm == 'Mm':
-            return minmax_normalize(M)
-        elif self.M_norm == 'Mz':
-            return zscore_normalize(M)
-        elif self.M_norm == 'Mmz':
-            return mmzs_normalize(M)
-        return M
-
-    def normalize_P(self, P):
-        if self.P_norm == 'Pr':
-            return row_normalize(P)
-        elif self.P_norm == 'Pc':
-            return column_normalize(P)
-        elif self.P_norm == 'Prc':
-            return doubly_normalize(P)
-        elif self.P_norm == 'SC':
-            return softmax_scaling(P, self.tau)
-        return P
-
-
-def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000
-
-    B, H, W = M.shape
-    assert r is None or r.shape == (B, H) or r.shape == (1, H)
-    assert c is None or c.shape == (B, W) or c.shape == (1, W)
-    assert not logspace or torch.all(M > 0.0)
-
-    r = 1.0 / H if r is None else r.unsqueeze(dim=2)
-    c = 1.0 / W if c is None else c.unsqueeze(dim=1)
-
-    if logspace:
-        P = torch.pow(M, gamma)
-    else:
-        P = torch.exp(-1.0 * gamma * (M - torch.amin(M, 2, keepdim=True)))
-
-    for i in range(maxiters):
-        alpha = torch.sum(P, 2)
-        # Perform division first for numerical stability
-        P = P / alpha.view(B, H, 1) * r
-
-        beta = torch.sum(P, 1)
-        if torch.max(torch.abs(beta - c)) <= eps:
-            break
-        P = P / beta.view(B, 1, W) * c
-
-    return P
-
-
-def PCC(m):
-    """Compute the Pearson’s correlation coefficients."""
-    fact = 1.0 / (m.size(1) - 1)
-    m = m - torch.mean(m, dim=1, keepdim=True)
-    mt = m.t()
-    c = fact * m.matmul(mt).squeeze()
-    d = torch.diag(c, 0)
-    std = torch.sqrt(d)
-    c /= std[:, None]
-    c /= std[None, :]
-    return c
-
-
-def cosine_similarity(m):
-    """Compute the cosine similarity matrix."""
-    m_norm = F.normalize(m, p=2, dim=1)  # 对输入进行L2范数归一化
-    return torch.matmul(m_norm, m_norm.T)
-
-
-def euclidean_dist(m):
-    """Compute the Euclidean distance matrix."""
-    n = m.size(0)
-    m = m.view(n, -1)
-    dist = torch.cdist(m, m, p=2.0)  # 计算欧氏距离
-    return dist
-
-
-def minmax_normalize(C):
-    max_val = C.max()
-    min_val = C.min()
-    return (C - min_val) / (max_val - min_val)
-
-
-def zscore_normalize(C):
-    mean = C.mean()
-    std = C.std()
-    return (C - mean) / std
-
-
-def mmzs_normalize(C):
-    C = minmax_normalize(C)
-    C = zscore_normalize(C)
-    return C
-
-
-def row_normalize(P):
-    row_sums = P.sum(dim=1, keepdim=True)
-    return P / row_sums
-
-
-def column_normalize(P):
-    col_sums = P.sum(dim=0, keepdim=True)
-    return P / col_sums
-
-
-def doubly_normalize(P):
-    P = row_normalize(P)
-    P = column_normalize(P)
-    return P
-
-
-def softmax_scaling(P, Tau):
-    m = torch.nn.Softmax(dim=1)
-    P = m(P / Tau)
-    return P
+        return loss + loss_g
 
 
 def cos_distance_softmax(x):
     soft = F.softmax(x, dim=2)
     w = soft.norm(p=2, dim=2, keepdim=True)
     return 1 - soft @ B.swapaxes(soft, -1, -2) / (w @ B.swapaxes(w, -1, -2)).clamp(min=eps)
-
 
 def knn_graph(x, k):
     if B.ndim(x) == 2:
@@ -262,9 +107,9 @@ def knn_graph(x, k):
 
     dist = cos_distance_softmax(x)
 
-    fil = 1 - torch.eye(n_points, n_points, device=x.device)
-    dist = dist * B.unsqueeze(fil, 0)
-    dist = dist - B.unsqueeze(torch.eye(n_points, n_points, device=x.device), 0)
+    fil = 1 - torch.eye(n_points, n_points)
+    dist = dist * B.unsqueeze(fil, 0).cuda()
+    dist = dist - B.unsqueeze(torch.eye(n_points, n_points), 0).cuda()
 
     k_indices = B.argtopk(dist, k, 2, descending=False)
 
@@ -278,9 +123,8 @@ def knn_graph(x, k):
     src = B.reshape(src, (-1,))
     adj = sparse.csr_matrix((B.asnumpy(B.zeros_like(dst) + 1), (B.asnumpy(dst), B.asnumpy(src))))
 
-    g = DGLGraph(adj)  # g = DGLGraph(adj, readonly=True)
+    g = DGLGraph(adj)    # g = DGLGraph(adj, readonly=True)
     return g
-
 
 class NCEAverage(nn.Module):
     def __init__(self, inputSize, outputSize, K):
@@ -290,7 +134,7 @@ class NCEAverage(nn.Module):
         stdv = 1. / math.sqrt(inputSize / 3)
         self.register_buffer('memory_l', torch.rand(outputSize, inputSize).mul_(2 * stdv).add_(-stdv))
         self.register_buffer('memory_ab', torch.rand(outputSize, inputSize).mul_(2 * stdv).add_(-stdv))
-
+    
     def update(self, l, ab, y):
         with torch.no_grad():
             l_pos = torch.index_select(self.memory_l, 0, y.view(-1))
@@ -306,7 +150,7 @@ class NCEAverage(nn.Module):
             ab_norm = ab_pos.pow(2).sum(1, keepdim=True).pow(0.5)
             updated_ab = ab_pos.div(ab_norm)
             self.memory_ab.index_copy_(0, y, updated_ab)
-
+    
     def get_smooth(self, l, ab, y):
         momentum = 0.75
         with torch.no_grad():
@@ -339,25 +183,36 @@ class NCEAverage(nn.Module):
 
         return weight_t, weight_s
 
-
 class NCESoftmaxLoss(nn.Module):
     """Softmax cross-entropy loss (a.k.a., info-NCE loss in CPC paper)"""
-
     def __init__(self):
         super(NCESoftmaxLoss, self).__init__()
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss().cuda()
 
     def forward(self, x):
         bsz = x.shape[0]
         # label 指定每个采样的正样本 idx = 0
-        label = torch.zeros([bsz], device=x.device).long()
+        label = torch.zeros([bsz]).cuda().long()
         loss = self.criterion(x, label)
         return loss
+
 
 
 class Encoder(nn.Module):
     def __init__(self, in_dim, hidden_dim):
         super(Encoder, self).__init__()
+
+        # mlp = nn.Sequential(
+        #     nn.Linear(in_dim, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, hidden_dim)
+        # )
+        # self.conv1 = GINConv(mlp)  # 替换为GINConv层
+
+        # self.conv1 = GraphConv(in_dim, hidden_dim)
+
+        # self.conv1 = SAGEConv(in_dim, hidden_dim, aggregator_type='mean')  # 使用GraphSAGE卷积层
+
         self.conv1 = TAGConv(in_dim, hidden_dim, k=1)
         self.l2norm = Normalize(2)
 
@@ -366,10 +221,8 @@ class Encoder(nn.Module):
         h = self.l2norm(self.conv1(g, h))
         return h
 
-
 class Embed(nn.Module):
     """Embedding module"""
-
     def __init__(self, dim_in=1024, dim_out=128):
         super(Embed, self).__init__()
         self.linear = nn.Linear(dim_in, dim_out)
@@ -381,10 +234,8 @@ class Embed(nn.Module):
         x = self.l2norm(x)
         return x
 
-
 class Normalize(nn.Module):
     """normalization layer"""
-
     def __init__(self, power=2):
         super(Normalize, self).__init__()
         self.power = power

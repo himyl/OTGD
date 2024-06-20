@@ -96,6 +96,10 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     losses_div = AverageMeter() if opt.alpha > 0 else None
     losses_hkd = AverageMeter() if opt.hkd_weight > 0 else None
     losses_ot = AverageMeter() if opt.ot_weight > 0 else None
+    losses_e = AverageMeter()
+    losses_g = AverageMeter()
+    losses_ge = AverageMeter()
+    losses_eg = AverageMeter()
 
 
     top1 = AverageMeter()
@@ -165,15 +169,31 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         elif opt.distill == 'gnnot':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
-            loss_kd, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+            loss_kd, loss_e, loss_g, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+            if losses_e is not None:
+                losses_e.update(loss_e.item(), input.size(0))
+            if losses_g is not None:
+                losses_g.update(loss_g.item(), input.size(0))
         elif opt.distill == 'gnngw':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
-            loss_kd, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+            loss_kd, loss_e, loss_g, loss_ge, loss_eg, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+            if losses_e is not None:
+                losses_e.update(loss_e.item(), input.size(0))
+            if losses_g is not None:
+                losses_g.update(loss_g.item(), input.size(0))
+            if losses_ge is not None:
+                losses_ge.update(loss_ge.item(), input.size(0))
+            if losses_eg is not None:
+                losses_eg.update(loss_eg.item(), input.size(0))
         elif opt.distill == 'mixgnn':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
-            loss_kd, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+            loss_kd, loss_e, loss_g, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
+        elif opt.distill == 'cbgnn':
+            f_s = feat_s[-1]
+            f_t = feat_t[-1]
+            loss_kd, loss_e, P = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
         elif opt.distill == 'attention':
             g_s = feat_s[1:-1]
             g_t = feat_t[1:-1]
@@ -292,10 +312,20 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
     if losses_div is not None:
         log_data["Train/Loss_Div"] = losses_div.avg
-    if losses_hkd is not None:
-        log_data["Train/Loss_hkd"] = losses_hkd.avg
-    if losses_ot is not None:
-        log_data["Train/Loss_ot"] = losses_ot.avg
+    if opt.distill in ['ceot']:
+        if losses_hkd is not None:
+            log_data["Train/Loss_hkd"] = losses_hkd.avg
+        if losses_ot is not None:
+            log_data["Train/Loss_ot"] = losses_ot.avg
+    if opt.distill in ['gnnot', 'gnngw', 'mixgnn']:
+        if losses_e is not None:
+            log_data["Train/Loss_e"] = losses_e.avg
+        if losses_g is not None:
+            log_data["Train/Loss_g"] = losses_g.avg
+        if losses_ge is not None:
+            log_data["Train/Loss_ge"] = losses_ge.avg
+        if losses_eg is not None:
+            log_data["Train/Loss_eg"] = losses_eg.avg
 
     wandb.log(log_data)
 

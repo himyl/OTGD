@@ -57,17 +57,25 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
-def save_dict_to_json(d, json_path):
-    """Saves dict of floats in json file
 
-    Args:
-        d: (dict) of float-castable values (np.float, int, float, etc.)
-        json_path: (string) path to json file
+def save_dict_to_json(d, json_path):
     """
-    with open(json_path, 'a') as f:
-        # We need to convert the values to float for json (it doesn't accept np.array, np.float, )
-        d = {k: v for k, v in d.items()}
-        json.dump(d, f, indent=4)
+    Saves a dictionary of floats in json format
+    """
+    def convert_to_serializable(obj):
+        if isinstance(obj, torch.Tensor):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: convert_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_serializable(v) for v in obj]
+        else:
+            return obj
+
+    serializable_dict = convert_to_serializable(d)
+
+    with open(json_path, 'w') as f:
+        json.dump(serializable_dict, f, indent=4)
 
 def load_json_to_dict(json_path):
     """Loads json file to dict

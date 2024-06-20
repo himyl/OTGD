@@ -14,16 +14,16 @@ knn = 8
 """ HKD method without InfoNCE estimator + OT loss"""
 
 
-class GNNOTLoss(nn.Module):
+class GNNComLoss(nn.Module):
     def __init__(self, opt):
-        super(GNNOTLoss, self).__init__()
+        super(GNNComLoss, self).__init__()
         self.embed_s = Embed(opt.s_dim, opt.feat_dim)
         self.embed_t = Embed(opt.t_dim, opt.feat_dim)
         self.gnn_s = Encoder(opt.feat_dim, opt.feat_dim)
         self.gnn_t = Encoder(opt.feat_dim, opt.feat_dim)
         self.feat_size = opt.feat_dim
-        self.hkd_weight = opt.hkd_weight
-        self.ot_weight = opt.ot_weight
+        self.P_norm = opt.P_norm
+        self.tau = opt.tau
         self.loss_ot = OTLoss(opt)
         self.device = opt.device
 
@@ -33,10 +33,12 @@ class GNNOTLoss(nn.Module):
         # graph independent part
         f_es = self.embed_s(f_s)
         f_et = self.embed_t(f_t)
-        loss_e, P, M = self.loss_ot(f_et, f_es)
+        Pe = self.loss_ot(f_et, f_es)
+        P = self.normalize_P(Pe)
+        loss_e = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
 
         if batchSize < knn:
-            return loss_e, P, M
+            return loss_e
 
         # graph nn
         G_pos_s = knn_graph(l_s.detach(), knn).to(self.device)
@@ -47,10 +49,23 @@ class GNNOTLoss(nn.Module):
         G_pos_t.ndata['h'] = f_et
         f_gt = self.gnn_t(G_pos_t)
 
-        loss_g, P, M = self.loss_ot(f_gt, f_gs)
-        loss = loss_g + loss_e
+        Pg = self.loss_ot(f_gt, f_gs)
+        Psum = Pg + Pe
+        Psum = self.normalize_P(Psum)
+        loss = torch.norm((Psum - torch.eye(Psum.shape[1], device=self.device)), 2)
 
-        return loss, loss_e, loss_g, P, M
+        return loss, loss_e, Psum
+
+    def normalize_P(self, P):
+        if self.P_norm == 'Pr':
+            return row_normalize(P)
+        elif self.P_norm == 'Pc':
+            return column_normalize(P)
+        elif self.P_norm == 'Prc':
+            return doubly_normalize(P)
+        elif self.P_norm == 'SC':
+            return softmax_scaling(P, self.tau)
+        return P
 
 
 class OTLoss(torch.nn.Module):
@@ -64,21 +79,15 @@ class OTLoss(torch.nn.Module):
         self.ot_iter = opt.ot_iter
         self.device = opt.device
         self.M_norm = opt.M_norm
-        self.P_norm = opt.P_norm
-        self.tau = opt.tau
 
     def forward(self, ft, fs):
         X = torch.cat((ft, fs), 0).to(self.device)
         C = self.compute_similarity(X)
         n = C.shape[0] // 2
         M = 1 - C[0:n, n:]
-
         M = self.normalize_M(M)
         P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
-        P = self.normalize_P(P)
-
-        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
-        return loss_ot, P, M
+        return P
 
     def compute_similarity(self, X):
         if self.method == 'pcc':
@@ -96,20 +105,6 @@ class OTLoss(torch.nn.Module):
             return mmzs_normalize(M)
         return M
 
-    def normalize_P(self, P):
-        if self.P_norm == 'Pr':
-            return row_normalize(P)
-        elif self.P_norm == 'Pc':
-            return column_normalize(P)
-        elif self.P_norm == 'Prc':
-            return doubly_normalize(P)
-        elif self.P_norm == 'SC':
-            return softmax_scaling(P, self.tau)
-        return P
-
-        # loss_ot = -torch.log(torch.diag(P)).mean()
-        # loss_ot = torch.sum(M * P).to(self.device) * 50
-        # loss_ot = loss_linear + self.ot_reg * torch.sum(P * torch.log(P + 1e-16))
 
 
 def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000

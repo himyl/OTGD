@@ -24,8 +24,9 @@ from dataset.tinyimagenet import get_tiny_imagenet_dataloaders, get_tiny_imagene
 
 from helper.util import adjust_learning_rate
 
-from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss
+from distiller_zoo.KD import DistillKL
+from distiller_zoo import HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss, MIXGNNLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss, GNNComLoss
 from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
@@ -72,7 +73,7 @@ def parse_option():
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
                                                                       'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
-                                                                      'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn'])
+                                                                      'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn', 'cbgnn'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -86,11 +87,12 @@ def parse_option():
     parser.add_argument('--ot_gamma', type=float, default=1, help='strength of entropy regularization')
     parser.add_argument('--ot_eps', type=float, default=1e-5, help='control the stopping condition for iterations')
     parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
-    parser.add_argument('--ot_reg', type=float, default=0.1, help='the maximum number of iterations')
+    parser.add_argument('--ot_reg', type=float, default=0, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
     parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
     parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
-    parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', None])
+    parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', 'SC', None])
+    parser.add_argument('--tau', type=float, default=0.1, help=' ')
 
     parser.add_argument('--device', type=str, default='cuda', help='')
 
@@ -102,6 +104,10 @@ def parse_option():
     # OT HKD
     parser.add_argument('--hkd_weight', type=float, default=1, help='weight for hkd')
     parser.add_argument('--ot_weight', type=float, default=1, help='weight for ot')
+    parser.add_argument('--e_weight', type=float, default=1, help=' ')
+    parser.add_argument('--g_weight', type=float, default=1, help=' ')
+    parser.add_argument('--ge_weight', type=float, default=1, help=' ')
+    parser.add_argument('--eg_weight', type=float, default=1, help=' ')
 
     # NCE distillation
     parser.add_argument('--feat_dim', default=128, type=int, help='feature dimension')
@@ -294,7 +300,19 @@ def main():
     elif opt.distill == 'mixgnn':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
-        criterion_kd = GNNGWLoss(opt)
+        criterion_kd = MIXGNNLoss(opt)
+        module_list.append(criterion_kd.embed_s)
+        module_list.append(criterion_kd.embed_t)
+        module_list.append(criterion_kd.gnn_s)
+        module_list.append(criterion_kd.gnn_t)
+        trainable_list.append(criterion_kd.embed_s)
+        trainable_list.append(criterion_kd.embed_t)
+        trainable_list.append(criterion_kd.gnn_s)
+        trainable_list.append(criterion_kd.gnn_t)
+    elif opt.distill == 'cbgnn':
+        opt.s_dim = feat_s[-1].shape[1]
+        opt.t_dim = feat_t[-1].shape[1]
+        criterion_kd = GNNComLoss(opt)
         module_list.append(criterion_kd.embed_s)
         module_list.append(criterion_kd.embed_t)
         module_list.append(criterion_kd.gnn_s)
@@ -467,6 +485,7 @@ def main():
     # This best accuracy is only for printing purpose.
     # The results reported in the paper/README is from the last epoch. 
     print('best accuracy:', best_acc)
+
 
     # save model
     state = {
