@@ -27,6 +27,7 @@ class HKDOTLoss(nn.Module):
         self.loss_ot = OTLoss(opt)
         self.hkd_weight = opt.hkd_weight
         self.ot_weight = opt.ot_weight
+        self.device = opt.device
 
 
         u = torch.tensor([i for i in range(opt.batch_size * opt.nce_k)]).cuda()
