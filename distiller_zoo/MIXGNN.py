@@ -50,11 +50,8 @@ class MIXGNNLoss(nn.Module):
         loss_g, P, M = self.loss_ot(f_gt, f_gs)
         loss = loss_g + loss_e
 
-        # loss_eg, P, M = self.loss_ot(f_et, f_gs)
-        # loss_ge, P, M = self.loss_ot(f_gt, f_es)
-        # loss = loss_eg + loss_ge + loss_e
-
         return loss, loss_e, loss_g, P, M
+
 
 
 class OTLoss(torch.nn.Module):
@@ -63,53 +60,68 @@ class OTLoss(torch.nn.Module):
         self.embed_s = Embed(opt.s_dim, opt.feat_dim)
         self.embed_t = Embed(opt.t_dim, opt.feat_dim)
         self.method = opt.ot_method
-        self.ot_reg = opt.ot_reg
         self.ot_gamma = opt.ot_gamma
         self.ot_eps = opt.ot_eps
         self.ot_iter = opt.ot_iter
         self.device = opt.device
         self.M_norm = opt.M_norm
         self.P_norm = opt.P_norm
+        self.tau = opt.tau
+        self.ot_power = opt.ot_power
 
     def forward(self, ft, fs):
         X = torch.cat((ft, fs), 0).to(self.device)
-        if self.method == 'pcc':
-            C = PCC(X)
-        elif self.method == 'cos':
-            C = cosine_similarity(X)
-        else:
-            raise ValueError("Invalid method specified.")
-
+        C = self.compute_similarity(X)
         n = C.shape[0] // 2
-        Nst = C[0:n, n:]
-        M = 1 - Nst
+
+        M = C[0:n, n:]
+
+        #
+        # M = self.normalize_M(M)
+        M = self.minmax_pow(M)
+        P = sinkhorn(1 - M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
+        # P = self.normalize_P(P)
+        loss_ot = torch.sum(P * M)
+
+        # loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
+        return loss_ot, P, M
+
+    def minmax_pow(self, X):
+        X = torch.pow(X, self.ot_power)
+        X -= X.min(dim=-1, keepdim=True).values
+        X /= X.max(dim=-1, keepdim=True).values
+        return X
+
+    def compute_similarity(self, X):
+        if self.method == 'pcc':
+            return PCC(X)
+        elif self.method == 'cos':
+            return cosine_similarity(X)
+        raise ValueError("Invalid method specified.")
+
+    def normalize_M(self, M):
         if self.M_norm == 'Mm':
-            M = minmax_normalize(M)
+            return minmax_normalize(M)
         elif self.M_norm == 'Mz':
-            M = zscore_normalize(M)
+            return zscore_normalize(M)
         elif self.M_norm == 'Mmz':
-            M = mmzs_normalize(M)
-        else:
-            M = M
+            return mmzs_normalize(M)
+        return M
 
-        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
-        P = P.squeeze(0)
-
+    def normalize_P(self, P):
         if self.P_norm == 'Pr':
-            P = row_normalize(P)
+            return row_normalize(P)
         elif self.P_norm == 'Pc':
-            P = column_normalize(P)
+            return column_normalize(P)
         elif self.P_norm == 'Prc':
-            P = doubly_normalize(P)
-        else:
-            P = P
+            return doubly_normalize(P)
+        elif self.P_norm == 'SC':
+            return softmax_scaling(P, self.tau)
+        return P
 
-        loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
         # loss_ot = -torch.log(torch.diag(P)).mean()
         # loss_ot = torch.sum(M * P).to(self.device) * 50
         # loss_ot = loss_linear + self.ot_reg * torch.sum(P * torch.log(P + 1e-16))
-        return loss_ot, P, M
-
 
 def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000
 
@@ -138,7 +150,6 @@ def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=Fal
 
     return P
 
-
 def PCC(m):
     """Compute the Pearson’s correlation coefficients."""
     fact = 1.0 / (m.size(1) - 1)
@@ -151,12 +162,10 @@ def PCC(m):
     c /= std[None, :]
     return c
 
-
 def cosine_similarity(m):
     """Compute the cosine similarity matrix."""
     m_norm = F.normalize(m, p=2, dim=1)  # 对输入进行L2范数归一化
     return torch.matmul(m_norm, m_norm.T)
-
 
 def euclidean_dist(m):
     """Compute the Euclidean distance matrix."""
@@ -165,46 +174,43 @@ def euclidean_dist(m):
     dist = torch.cdist(m, m, p=2.0)  # 计算欧氏距离
     return dist
 
-
 def minmax_normalize(C):
     max_val = C.max()
     min_val = C.min()
     return (C - min_val) / (max_val - min_val)
-
 
 def zscore_normalize(C):
     mean = C.mean()
     std = C.std()
     return (C - mean) / std
 
-
 def mmzs_normalize(C):
     C = minmax_normalize(C)
     C = zscore_normalize(C)
     return C
 
-
 def row_normalize(P):
     row_sums = P.sum(dim=1, keepdim=True)
     return P / row_sums
 
+def softmax_scaling(P, Tau):
+    m = torch.nn.Softmax(dim=1)
+    P = m(P / Tau)
+    return P
 
 def column_normalize(P):
     col_sums = P.sum(dim=0, keepdim=True)
     return P / col_sums
-
 
 def doubly_normalize(P):
     P = row_normalize(P)
     P = column_normalize(P)
     return P
 
-
 def cos_distance_softmax(x):
     soft = F.softmax(x, dim=2)
     w = soft.norm(p=2, dim=2, keepdim=True)
     return 1 - soft @ B.swapaxes(soft, -1, -2) / (w @ B.swapaxes(w, -1, -2)).clamp(min=eps)
-
 
 def knn_graph(x, k):
     if B.ndim(x) == 2:
@@ -232,20 +238,16 @@ def knn_graph(x, k):
     g = DGLGraph(adj)  # g = DGLGraph(adj, readonly=True)
     return g
 
-
 class Encoder(nn.Module):
     def __init__(self, in_dim, hidden_dim):
         super(Encoder, self).__init__()
-        # self.conv1 = TAGConv(in_dim, hidden_dim, k=1)
-        # self.conv1 = GraphConv(in_dim, hidden_dim)
-        self.conv1 = SAGEConv(in_dim, hidden_dim, aggregator_type='mean')  # 使用GraphSAGE卷积层
+        self.conv1 = TAGConv(in_dim, hidden_dim, k=1)
         self.l2norm = Normalize(2)
 
     def forward(self, g):
         h = g.ndata['h']
         h = self.l2norm(self.conv1(g, h))
         return h
-
 
 class Embed(nn.Module):
     """Embedding module"""
@@ -260,7 +262,6 @@ class Embed(nn.Module):
         x = self.linear(x)
         x = self.l2norm(x)
         return x
-
 
 class Normalize(nn.Module):
     """normalization layer"""

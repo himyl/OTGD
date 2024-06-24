@@ -64,49 +64,53 @@ class OTLoss(torch.nn.Module):
         self.embed_s = Embed(opt.s_dim, opt.feat_dim)
         self.embed_t = Embed(opt.t_dim, opt.feat_dim)
         self.method = opt.ot_method
-        self.ot_reg = opt.ot_reg
         self.ot_gamma = opt.ot_gamma
         self.ot_eps = opt.ot_eps
         self.ot_iter = opt.ot_iter
         self.device = opt.device
         self.M_norm = opt.M_norm
         self.P_norm = opt.P_norm
+        self.tau = opt.tau
 
     def forward(self, ft, fs):
         X = torch.cat((ft, fs), 0).to(self.device)
-        if self.method == 'pcc':
-            C = PCC(X)
-        elif self.method == 'cos':
-            C = cosine_similarity(X)
-        else:
-            raise ValueError("Invalid method specified.")
-
+        C = self.compute_similarity(X)
         n = C.shape[0] // 2
-        Nst = C[0:n, n:]
-        M = 1 - Nst
-        if self.M_norm == 'Mm':
-            M = minmax_normalize(M)
-        elif self.M_norm == 'Mz':
-            M = zscore_normalize(M)
-        elif self.M_norm == 'Mmz':
-            M = mmzs_normalize(M)
-        else:
-            M = M
+        M = C[0:n, n:]
 
-        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter)
-        P = P.squeeze(0)
-
-        if self.P_norm == 'Pr':
-            P = row_normalize(P)
-        elif self.P_norm == 'Pc':
-            P = column_normalize(P)
-        elif self.P_norm == 'Prc':
-            P = doubly_normalize(P)
-        else:
-            P = P
+        M = self.normalize_M(M)
+        P = sinkhorn(1 - M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
+        P = self.normalize_P(P)
 
         loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
         return loss_ot, P, M
+
+    def compute_similarity(self, X):
+        if self.method == 'pcc':
+            return PCC(X)
+        elif self.method == 'cos':
+            return cosine_similarity(X)
+        raise ValueError("Invalid method specified.")
+
+    def normalize_M(self, M):
+        if self.M_norm == 'Mm':
+            return minmax_normalize(M)
+        elif self.M_norm == 'Mz':
+            return zscore_normalize(M)
+        elif self.M_norm == 'Mmz':
+            return mmzs_normalize(M)
+        return M
+
+    def normalize_P(self, P):
+        if self.P_norm == 'Pr':
+            return row_normalize(P)
+        elif self.P_norm == 'Pc':
+            return column_normalize(P)
+        elif self.P_norm == 'Prc':
+            return doubly_normalize(P)
+        elif self.P_norm == 'SC':
+            return softmax_scaling(P, self.tau)
+        return P
 
 
 def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000
@@ -195,6 +199,12 @@ def column_normalize(P):
 def doubly_normalize(P):
     P = row_normalize(P)
     P = column_normalize(P)
+    return P
+
+
+def softmax_scaling(P, Tau):
+    m = torch.nn.Softmax(dim=1)
+    P = m(P / Tau)
     return P
 
 

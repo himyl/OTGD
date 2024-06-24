@@ -114,6 +114,9 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             input, target, index, contrast_idx = data
         else:
             input, target, index = data
+            if opt.distill == 'semckd' and input.shape[0] < opt.batch_size:
+                    continue
+
         data_time.update(time.time() - end)
 
         input = input.float()
@@ -217,6 +220,15 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             f_s = feat_s[-1]
             f_t = feat_t[-1]
             loss_kd = criterion_kd(f_s, f_t)
+        elif opt.distill == 'irg':
+            transform_s = [feat_s[i] for i in opt.transform_layer_s]
+            transform_t = [feat_t[i] for i in opt.transform_layer_t]
+            f_s = feat_s[-1]
+            f_t = feat_t[-1]
+            loss_kd = criterion_kd(f_s, f_t, transform_s, transform_t, opt.no_edge_transform)
+        elif opt.distill == 'semckd':
+            s_value, f_target, weight = module_list[1](feat_s[1:-1], feat_t[1:-1])
+            loss_kd = criterion_kd(s_value, f_target, weight)
         elif opt.distill == 'kdsvd':
             g_s = feat_s[1:-1]
             g_t = feat_t[1:-1]

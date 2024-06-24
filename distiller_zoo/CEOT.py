@@ -118,10 +118,10 @@ class OTLoss(torch.nn.Module):
         X = torch.cat((ft, fs), 0).to(self.device)
         C = self.compute_similarity(X)
         n = C.shape[0] // 2
-        M = 1 - C[0:n, n:]
+        M = C[0:n, n:]
 
         M = self.normalize_M(M)
-        P = sinkhorn(M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
+        P = sinkhorn(1 - M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
         P = self.normalize_P(P)
 
         loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)

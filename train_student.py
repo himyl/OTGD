@@ -16,17 +16,19 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
 from models import model_dict
-from models.util import Embed, ConvReg, LinearEmbed
+from models.util import Embed, ConvReg, LinearEmbed, SelfA
 from models.util import Connector, Translator, Paraphraser
 
 from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_sample
 from dataset.tinyimagenet import get_tiny_imagenet_dataloaders, get_tiny_imagenet_dataloaders_sample
+from dataset.imagenet import get_imagenet_dataloader, get_dataloader_sample
 
 from helper.util import adjust_learning_rate
 
 from distiller_zoo.KD import DistillKL
 from distiller_zoo import HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss, MIXGNNLoss
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss, GNNComLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, IRG, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss, GNNComLoss
+from distiller_zoo import SemCKDLoss
 from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
@@ -58,7 +60,7 @@ def parse_option():
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny_imagenet'],
+    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny_imagenet', 'imagenet'],
                         help='dataset')
 
     # model
@@ -71,8 +73,8 @@ def parse_option():
 
     # distillation
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
-                                                                      'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
-                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
+                                                                      'correlation', 'vid', 'crd', 'kdsvd', 'fsp', 'semckd',
+                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd', 'irg',
                                                                       'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn', 'cbgnn'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
@@ -92,12 +94,8 @@ def parse_option():
     parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
     parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', 'SC', None])
     parser.add_argument('--tau', type=float, default=0.1, help=' ')
+    parser.add_argument('--ot_power', type=float, default=7, help=' ')
     parser.add_argument('--device', type=str, default='cuda', help='')
-
-    # GW para for edge loss
-    parser.add_argument('--gw_tol', type=float, default=1e-6, help='Tolerance for solution precision')
-    parser.add_argument('--gw_reg', type=float, default=1.0, help='entropic regularization weight')
-    parser.add_argument('--gw_iter', type=int, default=10, help='Maximum number of iterations')
 
     # OT HKD
     parser.add_argument('--hkd_weight', type=float, default=1, help='weight for hkd')
@@ -114,6 +112,13 @@ def parse_option():
     parser.add_argument('--nce_t', default=0.07, type=float, help='temperature parameter for softmax')
     parser.add_argument('--nce_m', default=0.5, type=float, help='momentum for non-parametric updates')
 
+    # IRG distillation
+    parser.add_argument('--w_irg_vert', type=float, default=0.1, help='weight for IRG vertex')
+    parser.add_argument('--w_irg_edge', type=float, default=5.0, help='weight for IRG edge')
+    parser.add_argument('--w_irg_tran', type=float, default=5.0, help='weight for IRG transformation')
+    parser.add_argument('--transform_layer_t', nargs='+', type=int, default=[])
+    parser.add_argument('--transform_layer_s', nargs='+', type=int, default=[])
+    parser.add_argument('--no_edge_transform', action='store_true')  # default=false
     # hint layer
     parser.add_argument('--hint_layer', default=2, type=int, choices=[0, 1, 2, 3, 4])
 
@@ -180,6 +185,7 @@ def main():
     wandb.run.log_code(root="distiller_zoo/")
 
     best_acc = 0
+    best_acc_top5 = 0
 
     # tensorboard logger
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
@@ -204,6 +210,15 @@ def main():
         else:
             train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size,
                                                                              num_workers=opt.num_workers)
+    elif opt.dataset == 'imagenet':
+        if opt.distill in ['crd', 'hkd']:
+            train_loader, val_loader, n_data, _, train_sampler = get_dataloader_sample(dataset=opt.dataset,
+                                                                                       batch_size=opt.batch_size,
+                                                                                       num_workers=opt.num_workers,
+                                                                                       is_sample=True, k=opt.nce_k)
+        else:
+                train_loader, val_loader, train_sampler = get_imagenet_dataloader(dataset=opt.dataset, batch_size=opt.batch_size,
+                                                                                  num_workers=opt.num_workers)
     else:
         raise NotImplementedError(opt.dataset)
 
@@ -332,6 +347,13 @@ def main():
         module_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.embed_s)
         trainable_list.append(criterion_kd.embed_t)
+    elif opt.distill == 'semckd':
+        s_n = [f.shape[1] for f in feat_s[1:-1]]
+        t_n = [f.shape[1] for f in feat_t[1:-1]]
+        criterion_kd = SemCKDLoss()
+        self_attention = SelfA(len(feat_s) - 2, len(feat_t) - 2, opt.batch_size, s_n, t_n)
+        module_list.append(self_attention)
+        trainable_list.append(self_attention)
     elif opt.distill == 'hkd':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
@@ -357,6 +379,8 @@ def main():
         criterion_kd = PKT()
     elif opt.distill == 'kdsvd':
         criterion_kd = KDSVD()
+    elif opt.distill == 'irg':
+        criterion_kd = IRG()
     elif opt.distill == 'correlation':
         criterion_kd = Correlation()
         embed_s = LinearEmbed(feat_s[-1].shape[1], opt.feat_dim)
@@ -450,19 +474,21 @@ def main():
         logger.log_value('train_acc', train_acc, epoch)
         logger.log_value('train_loss', train_loss, epoch)
 
-        test_acc, tect_acc_top5, test_loss = validate(val_loader, model_s, criterion_cls, opt)
+        test_acc, test_acc_top5, test_loss = validate(val_loader, model_s, criterion_cls, opt)
 
         logger.log_value('test_acc', test_acc, epoch)
         logger.log_value('test_loss', test_loss, epoch)
-        logger.log_value('test_acc_top5', tect_acc_top5, epoch)
+        logger.log_value('test_acc_top5', test_acc_top5, epoch)
 
         # save the best model
         if test_acc > best_acc:
             best_acc = test_acc
+            best_acc_top5 = test_acc_top5
             state = {
                 'epoch': epoch,
                 'model': model_s.state_dict(),
                 'best_acc': best_acc,
+                'best_acc_top5': best_acc_top5,
             }
             save_file = os.path.join(opt.save_folder, '{}_best.pth'.format(opt.model_s))
             print('saving the best model!')
@@ -482,6 +508,7 @@ def main():
     # This best accuracy is only for printing purpose.
     # The results reported in the paper/README is from the last epoch. 
     print('best accuracy:', best_acc)
+    print('top-5 accuracy:', best_acc_top5)
 
 
     # save model

@@ -12,7 +12,9 @@ from .PKT import PKT
 from .RKD import RKDLoss
 from .SP import Similarity
 from .VID import VIDLoss
+from .SemCKD import SemCKDLoss
 from .GNN import GNNLoss
+from .IRG import IRG
 from .GNNCB import GNNComLoss
 # from .GNN1 import GNNLoss
 from .OT import OTLoss
