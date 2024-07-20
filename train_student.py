@@ -73,9 +73,12 @@ def parse_option():
 
     # distillation
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
-                                                                      'correlation', 'vid', 'crd', 'kdsvd', 'fsp', 'semckd',
-                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd', 'irg',
-                                                                      'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn', 'cbgnn'])
+                                                                      'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
+                                                                      'semckd',
+                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
+                                                                      'irg',
+                                                                      'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn', 'cbgnn',
+                                                                      'hkdot'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -90,7 +93,7 @@ def parse_option():
     parser.add_argument('--ot_eps', type=float, default=1e-5, help='control the stopping condition for iterations')
     parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
     parser.add_argument('--ot_reg', type=float, default=0, help='the maximum number of iterations')
-    parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
+    parser.add_argument('--ot_method', type=str, default='cos', choices=['pcc', 'cos', 'edu'])
     parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
     parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', 'SC', None])
     parser.add_argument('--tau', type=float, default=0.1, help=' ')
@@ -180,9 +183,11 @@ def load_teacher(model_path, n_cls):
 
 
 def main():
+    wandb.login(key='4d34516b8aa63d2e12c5116f75a0fcf604fe6a57')
     opt = parse_option()  # 存储程序的参数和配置
     wandb.init(project="HKD", name=opt.wandb_name, save_code=True)
     wandb.run.log_code(root="distiller_zoo/")
+
 
     best_acc = 0
     best_acc_top5 = 0
@@ -192,7 +197,7 @@ def main():
 
     # dataloader
     if opt.dataset == 'cifar100':
-        if opt.distill in ['crd', 'hkd', 'ceot']:
+        if opt.distill in ['crd', 'hkd', 'ceot', 'hkdot']:
             train_loader, val_loader, n_data = get_cifar100_dataloaders_sample(batch_size=opt.batch_size,
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
@@ -202,7 +207,7 @@ def main():
                                                                         num_workers=opt.num_workers,
                                                                         is_instance=True)
     elif opt.dataset == 'tiny_imagenet':
-        if opt.distill in ['crd', 'hkd', 'ceot']:
+        if opt.distill in ['crd', 'hkd', 'ceot', 'hkdot']:
             train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders_sample(batch_size=opt.batch_size,
                                                                                     num_workers=opt.num_workers,
                                                                                     k=opt.nce_k,
@@ -256,7 +261,7 @@ def main():
 
     print('distill loss is:', opt.distill, '\n')
 
-    if opt.distill in ['ot', 'ceot', 'gnnot', 'gnngw']:
+    if opt.distill in ['ot', 'ceot', 'gnnot', 'gnngw', 'hkdot']:
         print('cost matrix method is: ', opt.ot_method, '\n',
               '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter, '-----')
     if opt.distill in ['ceot']:
@@ -321,9 +326,10 @@ def main():
         trainable_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.gnn_s)
         trainable_list.append(criterion_kd.gnn_t)
-    elif opt.distill == 'cbgnn':
+    elif opt.distill == 'hkdot':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
+        opt.n_data = n_data
         criterion_kd = GNNComLoss(opt)
         module_list.append(criterion_kd.embed_s)
         module_list.append(criterion_kd.embed_t)

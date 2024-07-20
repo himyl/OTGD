@@ -60,8 +60,8 @@ def train_vanilla(epoch, train_loader, model, criterion, optimizer, opt):
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                   epoch, idx, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, top1=top1, top5=top5))
+                epoch, idx, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses, top1=top1, top5=top5))
             sys.stdout.flush()
 
     print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
@@ -104,7 +104,6 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     losses_ge = AverageMeter()
     losses_eg = AverageMeter()
 
-
     top1 = AverageMeter()
     top5 = AverageMeter()
 
@@ -113,12 +112,12 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
     end = time.time()
     for idx, data in enumerate(train_loader):
-        if opt.distill in ['crd', 'hkd', 'ceot', 'hkdot']:
+        if opt.distill in ['crd', 'hkd', 'ceot']:
             input, target, index, contrast_idx = data
         else:
             input, target, index = data
             if opt.distill == 'semckd' and input.shape[0] < opt.batch_size:
-                    continue
+                continue
 
         data_time.update(time.time() - end)
 
@@ -148,14 +147,6 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         # other kd beyond KL divergence
         if opt.distill == 'kd':
             loss_kd = torch.tensor(0.0, device=input.device)
-        elif opt.distill == 'ot':
-            f_s = feat_s[-1]
-            f_t = feat_t[-1]
-            loss_kd, P, M = criterion_kd(f_s, f_t)
-        elif opt.distill == 'hint':
-            f_s = module_list[1](feat_s[opt.hint_layer])
-            f_t = feat_t[opt.hint_layer]
-            loss_kd = criterion_kd(f_s, f_t)
         elif opt.distill == 'crd':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
@@ -172,18 +163,10 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
                 losses_hkd.update(loss_hkd.item(), input.size(0))
             if losses_ot is not None:
                 losses_ot.update(loss_ot.item(), input.size(0))
-        elif opt.distill == 'gnnot':
+        elif opt.distill == 'otgd':
             f_s = feat_s[-1]
             f_t = feat_t[-1]
-            loss_kd, loss_e, loss_g, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
-            if losses_e is not None:
-                losses_e.update(loss_e.item(), input.size(0))
-            if losses_g is not None:
-                losses_g.update(loss_g.item(), input.size(0))
-        elif opt.distill == 'gnngw':
-            f_s = feat_s[-1]
-            f_t = feat_t[-1]
-            loss_kd, loss_e, loss_g, loss_ge, loss_eg = criterion_kd(idx, epoch, f_s, logit_s, f_t, logit_t)
+            loss_kd, loss_e, loss_g, loss_ge, loss_eg, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
             if losses_e is not None:
                 losses_e.update(loss_e.item(), input.size(0))
             if losses_g is not None:
@@ -192,24 +175,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
                 losses_ge.update(loss_ge.item(), input.size(0))
             if losses_eg is not None:
                 losses_eg.update(loss_eg.item(), input.size(0))
-        elif opt.distill == 'mixgnn':
-            f_s = feat_s[-1]
-            f_t = feat_t[-1]
-            loss_kd, loss_e, loss_g, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t)
-        elif opt.distill == 'hkdot':
-            f_s = feat_s[-1]
-            f_t = feat_t[-1]
-            loss_kd, loss_hkd, loss_ot, P, M = criterion_kd(epoch, f_s, logit_s, f_t, logit_t, index, contrast_idx)
-            if losses_hkd is not None:
-                losses_hkd.update(loss_hkd.item(), input.size(0))
-            if losses_ot is not None:
-                losses_ot.update(loss_ot.item(), input.size(0))
         elif opt.distill == 'attention':
-            g_s = feat_s[1:-1]
-            g_t = feat_t[1:-1]
-            loss_group = criterion_kd(g_s, g_t)
-            loss_kd = sum(loss_group)
-        elif opt.distill == 'nst':
             g_s = feat_s[1:-1]
             g_t = feat_t[1:-1]
             loss_group = criterion_kd(g_s, g_t)
@@ -236,11 +202,6 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         elif opt.distill == 'semckd':
             s_value, f_target, weight = module_list[1](feat_s[1:-1], feat_t[1:-1])
             loss_kd = criterion_kd(s_value, f_target, weight)
-        elif opt.distill == 'kdsvd':
-            g_s = feat_s[1:-1]
-            g_t = feat_t[1:-1]
-            loss_group = criterion_kd(g_s, g_t)
-            loss_kd = sum(loss_group)
         elif opt.distill == 'correlation':
             f_s = module_list[1](feat_s[-1])
             f_t = module_list[2](feat_t[-1])
@@ -298,25 +259,24 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
                 data_time=data_time, loss=losses, top1=top1, top5=top5))
             sys.stdout.flush()
 
-    if (idx % 10 == 0 or idx == 1) and M is not None and P is not None:
-
+    if (epoch % 5 == 0 or epoch == 1) and M is not None and P is not None:
         plt.figure()
-        plt.matshow(M.detach().cpu().numpy(), cmap='viridis')
-        plt.title(f"Cost Matrix Heatmap at Epoch {idx}")
+        plt.imshow(M.detach().cpu().numpy(), cmap='hot')
+        plt.title(f"M Matrix Heatmap at Epoch {epoch}")
         plt.colorbar()
-        plt.savefig('cost_matrix.png')
+        plt.savefig('M_heatmap.png')
         plt.close()
 
         plt.figure()
-        plt.matshow(P.detach().cpu().numpy(), cmap='viridis')
-        plt.title(f"Transport Plan Heatmap at Epoch {idx}")
+        plt.imshow(P.detach().cpu().numpy(), cmap='hot')
+        plt.title(f"P Matrix Heatmap at Epoch {epoch}")
         plt.colorbar()
-        plt.savefig('transport_plan.png')
+        plt.savefig('P_heatmap.png')
         plt.close()
         # 记录热图到WandB，不手动设置步骤数
         wandb.log({
-            "M Matrix Heatmap": wandb.Image('cost_matrix.png', caption=f"Cost Matrix Epoch {idx}"),
-            "P Matrix Heatmap": wandb.Image('transport_plan.png', caption=f"Transport Plan Epoch {idx}")
+            "M Matrix Heatmap": wandb.Image('cost_heatmap.png', caption=f"Cost Matrix Epoch {epoch}"),
+            "P Matrix Heatmap": wandb.Image('P_heatmap.png', caption=f"P Matrix Epoch {epoch}")
         })
 
     log_data = {
@@ -331,12 +291,12 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
     if losses_div is not None:
         log_data["Train/Loss_Div"] = losses_div.avg
-    if opt.distill in ['ceot', 'hkdot']:
+    if opt.distill in ['ceot']:
         if losses_hkd is not None:
             log_data["Train/Loss_hkd"] = losses_hkd.avg
         if losses_ot is not None:
             log_data["Train/Loss_ot"] = losses_ot.avg
-    if opt.distill in ['gnnot', 'gnngw', 'mixgnn']:
+    if opt.distill in ['otgd']:
         if losses_e is not None:
             log_data["Train/Loss_e"] = losses_e.avg
         if losses_g is not None:
@@ -393,8 +353,8 @@ def validate(val_loader, model, criterion, opt):
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                       'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                       idx, len(val_loader), batch_time=batch_time, loss=losses,
-                       top1=top1, top5=top5))
+                    idx, len(val_loader), batch_time=batch_time, loss=losses,
+                    top1=top1, top5=top5))
         log_data = {
             "Test/Loss": losses.avg,
             "Test/Acc@1": top1.avg,

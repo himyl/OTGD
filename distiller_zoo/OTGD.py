@@ -1,15 +1,13 @@
 import torch
 from torch import nn
-import math
 import torch.nn.functional as F
-import dgl
 import dgl.backend as B
 from dgl import DGLGraph
 from scipy import sparse
 from dgl.nn.pytorch import TAGConv
-import wandb
 import matplotlib.pyplot as plt
-
+import wandb
+import numpy as np
 
 eps = 1e-7
 knn = 8
@@ -17,9 +15,9 @@ knn = 8
 """ HKD method without InfoNCE estimator + OT loss"""
 
 
-class GNNGWLoss(nn.Module):
+class OTGDLoss(nn.Module):
     def __init__(self, opt):
-        super(GNNGWLoss, self).__init__()
+        super(OTGDLoss, self).__init__()
         self.embed_s = Embed(opt.s_dim, opt.feat_dim)
         self.embed_t = Embed(opt.t_dim, opt.feat_dim)
         self.gnn_s = Encoder(opt.feat_dim, opt.feat_dim)
@@ -32,16 +30,16 @@ class GNNGWLoss(nn.Module):
         self.loss_ot = OTLoss(opt)
         self.device = opt.device
 
-    def forward(self, idx, epoch, f_s, l_s, f_t, l_t):
+    def forward(self, epoch, f_s, l_s, f_t, l_t):
         batchSize = f_s.size(0)
 
         # graph independent part
         f_es = self.embed_s(f_s)
         f_et = self.embed_t(f_t)
-        loss_e, P, M = self.loss_ot(f_et, f_es)
+        loss_e, P, cost = self.loss_ot(f_et, f_es)
 
         if batchSize < knn:
-            return loss_e, P, M
+            return loss_e, P, cost
 
         # graph nn
         G_pos_s = knn_graph(l_s.detach(), knn).to(self.device)
@@ -54,84 +52,36 @@ class GNNGWLoss(nn.Module):
 
         loss_ge, _, _ = self.loss_ot(f_gt, f_es)
         loss_eg, _, _ = self.loss_ot(f_et, f_gt)
-        loss_g, P, M = self.loss_ot(f_gt, f_gs)
+        loss_g, P, cost = self.loss_ot(f_gt, f_gs)
 
         loss = self.g_weight * loss_g + self.e_weight * loss_e + self.ge_weight * loss_ge + self.eg_weight * loss_eg
 
-        if idx % 50 == 0 or idx == 1:
-            # Create a heatmap using Matplotlib
-            fig, ax = plt.subplots()
-            cax = ax.matshow(M.detach().cpu().numpy(), cmap='viridis')
-            fig.colorbar(cax)
-            plt.title(f"Cost Matrix Heatmap at {idx}", fontsize=16)
-            plt.xticks(fontsize=12)
-            plt.yticks(fontsize=12)
-            wandb.log({"M_matrix": wandb.Image(fig)})
-            plt.close(fig)
+        return loss, loss_e, loss_g, loss_ge, loss_eg, P, cost
 
-            fig, ax = plt.subplots()
-            cax = ax.matshow(P.detach().cpu().numpy(), cmap='viridis')
-            fig.colorbar(cax)
-            plt.title(f"Transport Plan Heatmap at {idx}", fontsize=16)
-            plt.xticks(fontsize=12)
-            plt.yticks(fontsize=12)
-            wandb.log({"P_matrix": wandb.Image(fig)})
-            plt.close(fig)
-
-        return loss, loss_e, loss_g, loss_ge, loss_eg
 
 class OTLoss(torch.nn.Module):
     def __init__(self, opt):
         super(OTLoss, self).__init__()
-        self.embed_s = Embed(opt.s_dim, opt.feat_dim)
-        self.embed_t = Embed(opt.t_dim, opt.feat_dim)
-        self.method = opt.ot_method
         self.ot_gamma = opt.ot_gamma
         self.ot_eps = opt.ot_eps
         self.ot_iter = opt.ot_iter
         self.device = opt.device
-        self.M_norm = opt.M_norm
-        self.P_norm = opt.P_norm
-        self.tau = opt.tau
 
     def forward(self, ft, fs):
         X = torch.cat((ft, fs), 0).to(self.device)
-        C = self.compute_similarity(X)
+        C = cosine_similarity(X)
         n = C.shape[0] // 2
         M = C[0:n, n:]
 
-        M = self.normalize_M(M)
+        M = zscore_normalize(M)
         P = sinkhorn(1 - M.unsqueeze(0), gamma=self.ot_gamma, eps=self.ot_eps, maxiters=self.ot_iter).squeeze(0)
-        P = self.normalize_P(P)
+        P = doubly_normalize(P)
 
         loss_ot = torch.norm((P - torch.eye(P.shape[1], device=self.device)), 2)
         return loss_ot, P, M
 
-    def compute_similarity(self, X):
-        if self.method == 'pcc':
-            return PCC(X)
-        elif self.method == 'cos':
-            return cosine_similarity(X)
-        raise ValueError("Invalid method specified.")
 
-    def normalize_M(self, M):
-        if self.M_norm == 'Mm':
-            return minmax_normalize(M)
-        elif self.M_norm == 'Mz':
-            return zscore_normalize(M)
-        return M
-
-    def normalize_P(self, P):
-        if self.P_norm == 'Pr':
-            return row_normalize(P)
-        elif self.P_norm == 'Pc':
-            return column_normalize(P)
-        elif self.P_norm == 'Prc':
-            return doubly_normalize(P)
-        return P
-
-
-def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):  # maxiters=1000
+def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=False):
 
     B, H, W = M.shape
     assert r is None or r.shape == (B, H) or r.shape == (1, H)
@@ -158,50 +108,19 @@ def sinkhorn(M, r=None, c=None, gamma=1.0, eps=1.0e-6, maxiters=20, logspace=Fal
 
     return P
 
-
-def PCC(m):
-    """Compute the Pearson’s correlation coefficients."""
-    fact = 1.0 / (m.size(1) - 1)
-    m = m - torch.mean(m, dim=1, keepdim=True)
-    mt = m.t()
-    c = fact * m.matmul(mt).squeeze()
-    d = torch.diag(c, 0)  # 提取对角线元素
-    std = torch.sqrt(d)  # 计算标准差
-    c /= std[:, None]
-    c /= std[None, :]
-    return c
-
-
 def cosine_similarity(m):
     """Compute the cosine similarity matrix."""
-    m_norm = F.normalize(m, p=2, dim=1)  # 对输入进行L2范数归一化
+    m_norm = F.normalize(m, p=2, dim=1)
     return torch.matmul(m_norm, m_norm.T)
-
-def minmax_normalize(C):
-    max_val = C.max()
-    min_val = C.min()
-    return (C - min_val) / (max_val - min_val)
 
 
 def zscore_normalize(C):
-    mean = C.mean()
-    std = C.std()
-    return (C - mean) / std
-
-
-def row_normalize(P):
-    row_sums = P.sum(dim=1, keepdim=True)
-    return P / row_sums
-
-
-def column_normalize(P):
-    col_sums = P.sum(dim=0, keepdim=True)
-    return P / col_sums
+    return (C - C.mean()) / C.std()
 
 
 def doubly_normalize(P):
-    P = row_normalize(P)
-    P = column_normalize(P)
+    P = P / P.sum(dim=1, keepdim=True)
+    P = P / P.sum(dim=0, keepdim=True)
     return P
 
 
@@ -274,5 +193,4 @@ class Normalize(nn.Module):
 
     def forward(self, x):
         norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
-        out = x.div(norm)
-        return out
+        return x  / norm

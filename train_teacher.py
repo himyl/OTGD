@@ -14,10 +14,13 @@ import torch.backends.cudnn as cudnn
 from models import model_dict
 
 from dataset.cifar100 import get_cifar100_dataloaders
+from dataset.tinyimagenet import get_tiny_imagenet_dataloaders
 
 from helper.util import adjust_learning_rate, accuracy, AverageMeter
 from helper.loops import train_vanilla as train, validate
 
+
+import wandb
 
 def parse_option():
 
@@ -39,13 +42,15 @@ def parse_option():
     parser.add_argument('--weight_decay', type=float, default=5e-4, help='weight decay')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
+    parser.add_argument('--wandb_name', type=str, default='default_name', help='Name of the W&B run')
+
     # dataset
     parser.add_argument('--model', type=str, default='resnet110',
                         choices=['resnet8', 'resnet14', 'resnet20', 'resnet32', 'resnet44', 'resnet56', 'resnet110',
                                  'resnet8x4', 'resnet32x4', 'wrn_16_1', 'wrn_16_2', 'wrn_40_1', 'wrn_40_2',
                                  'vgg8', 'vgg11', 'vgg13', 'vgg16', 'vgg19',
                                  'MobileNetV2', 'ShuffleV1', 'ShuffleV2', ])
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100'], help='dataset')
+    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny_imagenet'], help='dataset')
 
     parser.add_argument('-t', '--trial', type=int, default=0, help='the experiment id')
 
@@ -86,11 +91,16 @@ def main():
     best_acc = 0
 
     opt = parse_option()
+    wandb.init(project="HKD", name=opt.wandb_name, save_code=True)
+    wandb.run.log_code(root="distiller_zoo/")
 
     # dataloader
     if opt.dataset == 'cifar100':
         train_loader, val_loader = get_cifar100_dataloaders(batch_size=opt.batch_size, num_workers=opt.num_workers)
         n_cls = 100
+    elif opt.dataset == 'tiny_imagenet':
+        train_loader, val_loader, _ = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size, num_workers=opt.num_workers)
+        n_cls = 200
     else:
         raise NotImplementedError(opt.dataset)
 
@@ -120,7 +130,7 @@ def main():
         print("==> training...")
 
         time1 = time.time()
-        train_acc, train_loss = train(epoch, train_loader, model, criterion, optimizer, opt)
+        train_acc, train_acc_top5, train_loss = train(epoch, train_loader, model, criterion, optimizer, opt)
         time2 = time.time()
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 

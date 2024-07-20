@@ -8,8 +8,6 @@ import os
 import argparse
 import socket
 import time
-import math
-import json
 
 import tensorboard_logger as tb_logger
 import torch
@@ -18,22 +16,23 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
 from models import model_dict
-from models.util import Embed, ConvReg, LinearEmbed
+from models.util import Embed, ConvReg, LinearEmbed, SelfA
 from models.util import Connector, Translator, Paraphraser
-from models.temp_global import Global_T
 
 from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_sample
 from dataset.tinyimagenet import get_tiny_imagenet_dataloaders, get_tiny_imagenet_dataloaders_sample
+from dataset.imagenet import get_imagenet_dataloader, get_dataloader_sample
 
 from helper.util import adjust_learning_rate
-from helper.util import save_dict_to_json
 
-from distiller_zoo import HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
-from distiller_zoo.KD1 import DistillKL, DistillKL_logit_stand
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, OTLoss, HKDOTLoss, GNNOTLoss, GNNGWLoss
+from distiller_zoo.KD import DistillKL
+from distiller_zoo.OTGD import OTGDLoss
+from distiller_zoo import Attention, Similarity, Correlation, VIDLoss, RKDLoss, GNNLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, FSP, IRG, HKDOTLoss
+from distiller_zoo import SemCKDLoss
 from crd.criterion import CRDLoss
 
-from helper.loops1 import train_distill as train, validate
+from helper.loops_ot import train_distill as train, validate
 from helper.pretrain import init
 
 import wandb
@@ -62,7 +61,7 @@ def parse_option():
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny_imagenet'],
+    parser.add_argument('--dataset', type=str, default='cifar100', choices=['cifar100', 'tiny_imagenet', 'imagenet'],
                         help='dataset')
 
     # model
@@ -74,10 +73,10 @@ def parse_option():
     parser.add_argument('--path_t', type=str, default=None, help='teacher model snapshot')
 
     # distillation
-    parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
-                                                                      'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
-                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst', 'hkd',
-                                                                      'ot', 'ceot', 'gnnot', 'gnngw', 'mixgnn'])
+    parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'attention', 'similarity',
+                                                                      'correlation', 'vid', 'crd', 'fsp', 'semckd',
+                                                                      'rkd', 'pkt', 'abound', 'factor', 'hkd', 'irg',
+                                                                      'ceot', 'otgd'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -90,23 +89,20 @@ def parse_option():
     # OT para for node loss
     parser.add_argument('--ot_gamma', type=float, default=1, help='strength of entropy regularization')
     parser.add_argument('--ot_eps', type=float, default=1e-5, help='control the stopping condition for iterations')
-    parser.add_argument('--ot_iter', type=int, default=10, help='the maximum number of iterations')
+    parser.add_argument('--ot_iter', type=int, default=2, help='the maximum number of iterations')
     parser.add_argument('--ot_reg', type=float, default=0, help='the maximum number of iterations')
     parser.add_argument('--ot_method', type=str, default='pcc', choices=['pcc', 'cos', 'edu'])
-    parser.add_argument('--ot_embed', type=str, default=None, help='use embed feature or not')
     parser.add_argument('--M_norm', type=str, default='Mz', choices=['Mz', 'Mm', 'Mmz', None])
-    parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc', None])
-
+    parser.add_argument('--P_norm', type=str, default='Prc', choices=['Pr', 'Pc', 'Prc',  None])
     parser.add_argument('--device', type=str, default='cuda', help='')
-
-    # GW para for edge loss
-    parser.add_argument('--gw_tol', type=float, default=1e-6, help='Tolerance for solution precision')
-    parser.add_argument('--gw_reg', type=float, default=1.0, help='entropic regularization weight')
-    parser.add_argument('--gw_iter', type=int, default=10, help='Maximum number of iterations')
 
     # OT HKD
     parser.add_argument('--hkd_weight', type=float, default=1, help='weight for hkd')
     parser.add_argument('--ot_weight', type=float, default=1, help='weight for ot')
+    parser.add_argument('--e_weight', type=float, default=1, help=' ')
+    parser.add_argument('--g_weight', type=float, default=1, help=' ')
+    parser.add_argument('--ge_weight', type=float, default=1, help=' ')
+    parser.add_argument('--eg_weight', type=float, default=1, help=' ')
 
     # NCE distillation
     parser.add_argument('--feat_dim', default=128, type=int, help='feature dimension')
@@ -115,20 +111,13 @@ def parse_option():
     parser.add_argument('--nce_t', default=0.07, type=float, help='temperature parameter for softmax')
     parser.add_argument('--nce_m', default=0.5, type=float, help='momentum for non-parametric updates')
 
-    parser.add_argument('--logit_stand', action='store_true')
-
-    # CTKD distillation
-    parser.add_argument('--have_mlp', type=int, default=0)
-    parser.add_argument('--mlp_name', type=str, default='global')
-    parser.add_argument('--t_start', type=float, default=1)
-    parser.add_argument('--t_end', type=float, default=20)
-    parser.add_argument('--cosine_decay', type=int, default=1)
-    parser.add_argument('--decay_max', type=float, default=0)
-    parser.add_argument('--decay_min', type=float, default=0)
-    parser.add_argument('--decay_loops', type=float, default=0)
-
-    # hint layer
-    parser.add_argument('--hint_layer', default=2, type=int, choices=[0, 1, 2, 3, 4])
+    # IRG distillation
+    parser.add_argument('--w_irg_vert', type=float, default=0.1, help='weight for IRG vertex')
+    parser.add_argument('--w_irg_edge', type=float, default=5.0, help='weight for IRG edge')
+    parser.add_argument('--w_irg_tran', type=float, default=5.0, help='weight for IRG transformation')
+    parser.add_argument('--transform_layer_t', nargs='+', type=int, default=[])
+    parser.add_argument('--transform_layer_s', nargs='+', type=int, default=[])
+    parser.add_argument('--no_edge_transform', action='store_true')  # default=false
 
     opt = parser.parse_args()
 
@@ -187,59 +176,21 @@ def load_teacher(model_path, n_cls):
     return model
 
 
-class CosineDecay(object):
-    def __init__(self,
-                 max_value,
-                 min_value,
-                 num_loops):
-        self._max_value = max_value
-        self._min_value = min_value
-        self._num_loops = num_loops
-
-    def get_value(self, i):
-        if i < 0:
-            i = 0
-        if i >= self._num_loops:
-            i = self._num_loops
-        value = (math.cos(i * math.pi / self._num_loops) + 1.0) * 0.5
-        value = value * (self._max_value - self._min_value) + self._min_value
-        return value
-
-
-class LinearDecay(object):
-    def __init__(self,
-                 max_value,
-                 min_value,
-                 num_loops):
-        self._max_value = max_value
-        self._min_value = min_value
-        self._num_loops = num_loops
-
-    def get_value(self, i):
-        if i < 0:
-            i = 0
-        if i >= self._num_loops:
-            i = self._num_loops - 1
-
-        value = (self._max_value - self._min_value) / self._num_loops
-        value = i * (-value)
-
-        return value
-
-
 def main():
-    opt = parse_option()
+    wandb.login(key='4d34516b8aa63d2e12c5116f75a0fcf604fe6a57')
+    opt = parse_option()  # 存储程序的参数和配置
     wandb.init(project="HKD", name=opt.wandb_name, save_code=True)
     wandb.run.log_code(root="distiller_zoo/")
 
     best_acc = 0
+    best_acc_top5 = 0
 
     # tensorboard logger
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
 
     # dataloader
     if opt.dataset == 'cifar100':
-        if opt.distill in ['crd', 'hkd', 'ceot']:
+        if opt.distill in ['crd', 'hkd', 'ceot', 'hkdot']:
             train_loader, val_loader, n_data = get_cifar100_dataloaders_sample(batch_size=opt.batch_size,
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
@@ -257,6 +208,15 @@ def main():
         else:
             train_loader, val_loader, n_data = get_tiny_imagenet_dataloaders(batch_size=opt.batch_size,
                                                                              num_workers=opt.num_workers)
+    elif opt.dataset == 'imagenet':
+        if opt.distill in ['crd', 'hkd']:
+            train_loader, val_loader, n_data, _, train_sampler = get_dataloader_sample(dataset=opt.dataset,
+                                                                                       batch_size=opt.batch_size,
+                                                                                       num_workers=opt.num_workers,
+                                                                                       is_sample=True, k=opt.nce_k)
+        else:
+                train_loader, val_loader, train_sampler = get_imagenet_dataloader(dataset=opt.dataset, batch_size=opt.batch_size,
+                                                                                  num_workers=opt.num_workers)
     else:
         raise NotImplementedError(opt.dataset)
 
@@ -274,19 +234,6 @@ def main():
     model_s = model_dict[opt.model_s](num_classes=n_cls)
 
     data = torch.randn(2, 3, 32, 32)
-    # if opt.dataset == 'cifar100':
-    #     data = torch.randn(2, 3, 32, 32)
-    # elif opt.dataset == 'tiny-imagenet':
-    #     data = torch.randn(2, 3, 64, 64)
-
-    mlp = None
-
-    if opt.have_mlp:
-        if opt.mlp_name == 'global':
-            mlp = Global_T()
-        else:
-            print('mlp name wrong')
-
     model_t.eval()
     model_s.eval()
     feat_t, _ = model_t(data, is_feat=True)
@@ -296,23 +243,20 @@ def main():
     module_list.append(model_s)
     trainable_list = nn.ModuleList([])
     trainable_list.append(model_s)
-    trainable_list.append(mlp)
 
     criterion_cls = nn.CrossEntropyLoss()
-    criterion_div = DistillKL() if opt.logit_stand else DistillKL_logit_stand()
+    criterion_div = DistillKL(opt.kd_T)
 
     print('distill loss is:', opt.distill, '\n')
 
-    if opt.distill in ['ot', 'ceot', 'gnnot']:
+    if opt.distill in ['ot', 'ceot', 'otgd']:
         print('cost matrix method is: ', opt.ot_method, '\n',
-              '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter,
-              ', use_embed: ', opt.ot_embed, '-----')
+              '----- OT gamma is ', opt.ot_gamma, ', eps is ', opt.ot_eps, ', max_iter is ', opt.ot_iter, '-----')
     if opt.distill in ['ceot']:
         print('\n', 'hkd weight is: ', opt.hkd_weight, ' ot weight is: ', opt.ot_weight)
 
     if opt.distill == 'kd':
         criterion_kd = DistillKL(opt.kd_T)
-
     elif opt.distill == 'ceot':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
@@ -326,10 +270,10 @@ def main():
         trainable_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.gnn_s)
         trainable_list.append(criterion_kd.gnn_t)
-    elif opt.distill == 'gnnot':
+    elif opt.distill == 'otgd':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
-        criterion_kd = GNNOTLoss(opt)
+        criterion_kd = OTGDLoss(opt)
         module_list.append(criterion_kd.embed_s)
         module_list.append(criterion_kd.embed_t)
         module_list.append(criterion_kd.gnn_s)
@@ -338,23 +282,6 @@ def main():
         trainable_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.gnn_s)
         trainable_list.append(criterion_kd.gnn_t)
-    elif opt.distill == 'mixgnn':
-        opt.s_dim = feat_s[-1].shape[1]
-        opt.t_dim = feat_t[-1].shape[1]
-        criterion_kd = GNNGWLoss(opt)
-        module_list.append(criterion_kd.embed_s)
-        module_list.append(criterion_kd.embed_t)
-        module_list.append(criterion_kd.gnn_s)
-        module_list.append(criterion_kd.gnn_t)
-        trainable_list.append(criterion_kd.embed_s)
-        trainable_list.append(criterion_kd.embed_t)
-        trainable_list.append(criterion_kd.gnn_s)
-        trainable_list.append(criterion_kd.gnn_t)
-    elif opt.distill == 'hint':
-        criterion_kd = HintLoss()
-        regress_s = ConvReg(feat_s[opt.hint_layer].shape, feat_t[opt.hint_layer].shape)
-        module_list.append(regress_s)
-        trainable_list.append(regress_s)
     elif opt.distill == 'crd':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
@@ -364,6 +291,13 @@ def main():
         module_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.embed_s)
         trainable_list.append(criterion_kd.embed_t)
+    elif opt.distill == 'semckd':
+        s_n = [f.shape[1] for f in feat_s[1:-1]]
+        t_n = [f.shape[1] for f in feat_t[1:-1]]
+        criterion_kd = SemCKDLoss()
+        self_attention = SelfA(len(feat_s) - 2, len(feat_t) - 2, opt.batch_size, s_n, t_n)
+        module_list.append(self_attention)
+        trainable_list.append(self_attention)
     elif opt.distill == 'hkd':
         opt.s_dim = feat_s[-1].shape[1]
         opt.t_dim = feat_t[-1].shape[1]
@@ -379,16 +313,14 @@ def main():
         trainable_list.append(criterion_kd.gnn_t)
     elif opt.distill == 'attention':
         criterion_kd = Attention()
-    elif opt.distill == 'nst':
-        criterion_kd = NSTLoss()
     elif opt.distill == 'similarity':
         criterion_kd = Similarity()
     elif opt.distill == 'rkd':
         criterion_kd = RKDLoss()
     elif opt.distill == 'pkt':
         criterion_kd = PKT()
-    elif opt.distill == 'kdsvd':
-        criterion_kd = KDSVD()
+    elif opt.distill == 'irg':
+        criterion_kd = IRG()
     elif opt.distill == 'correlation':
         criterion_kd = Correlation()
         embed_s = LinearEmbed(feat_s[-1].shape[1], opt.feat_dim)
@@ -468,24 +400,14 @@ def main():
     teacher_acc, _, _ = validate(val_loader, model_t, criterion_cls, opt)
     print('teacher accuracy: ', teacher_acc)
 
-    if opt.cosine_decay:
-        gradient_decay = CosineDecay(max_value=opt.decay_max, min_value=opt.decay_min, num_loops=opt.decay_loops)
-    else:
-        gradient_decay = LinearDecay(max_value=opt.decay_max, min_value=opt.decay_min, num_loops=opt.decay_loops)
-
-    decay_value = 1
-
     # routine
     for epoch in range(1, opt.epochs + 1):
 
         adjust_learning_rate(epoch, opt, optimizer)
         print("==> training...")
 
-        if opt.have_mlp:
-            decay_value = gradient_decay.get_value(epoch)
-
         time1 = time.time()
-        train_acc, train_acc_top5, train_loss, temp = train(epoch, train_loader, module_list, mlp, decay_value, criterion_list, optimizer, opt)
+        train_acc, train_loss = train(epoch, train_loader, module_list, criterion_list, optimizer, opt)
         time2 = time.time()
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
@@ -501,24 +423,14 @@ def main():
         # save the best model
         if test_acc > best_acc:
             best_acc = test_acc
+            best_acc_top5 = test_acc_top5
             state = {
                 'epoch': epoch,
                 'model': model_s.state_dict(),
                 'best_acc': best_acc,
+                'best_acc_top5': best_acc_top5,
             }
             save_file = os.path.join(opt.save_folder, '{}_best.pth'.format(opt.model_s))
-
-            test_merics = {
-                'test_acc': test_acc,
-                'test_acc_top5': test_acc_top5,
-                'best_acc': best_acc,
-                'epoch': epoch,
-                'temp': json.dumps(temp.cpu().detach().numpy()[0].tolist()),
-                'decay_value': decay_value}
-
-            save_dict_to_json(test_merics, os.path.join(opt.save_folder, "test_best_metrics.json"))
-
-
             print('saving the best model!')
             torch.save(state, save_file)
 
@@ -534,8 +446,10 @@ def main():
             torch.save(state, save_file)
 
     # This best accuracy is only for printing purpose.
-    # The results reported in the paper/README is from the last epoch.
+    # The results reported in the paper/README is from the last epoch. 
     print('best accuracy:', best_acc)
+    print('top-5 accuracy:', best_acc_top5)
+
 
     # save model
     state = {
