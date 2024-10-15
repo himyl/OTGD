@@ -1,8 +1,8 @@
-# HKD
+# OTGD
 
 ![gif](./img/HKD.gif)
 
-Code for ICCV 2021 paper "Distilling Holistic Knowledge with Graph Neural Networks"
+Code for ICONIP 2024 paper "Knowledge Distillation with Differentiable Optimal Transport on Graph Neural Networks"
 
 https://arxiv.org/abs/2108.05507
 
@@ -28,10 +28,10 @@ conda install --yes --file requirements.txt
     ```
    which will download and save the models to `save/models`
 
-2. Run distillation by commands in `scripts\run_cifar_distill.sh`. An example of running HKD is given by:
+2. Run distillation by commands in `scripts\run_cifar_distill.sh`. An example of running OTGD is given by:
 
     ```
-    python train_student.py --path_t ./save/models/resnet32x4_vanilla/ckpt_epoch_240.pth --distill hkd --model_s resnet8x4 -a 1 -b 3 --mode hkd --trial 1
+    python train_student.py --path_t ./save/models/resnet32x4_vanilla/ckpt_epoch_240.pth --distill ceot --model_s resnet8x4 -a 1 -b 1 --mode hkd --trial 1
     ```
 
 ## Citation
