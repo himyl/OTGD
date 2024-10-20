@@ -10,7 +10,6 @@ https://arxiv.org/abs/2108.05507
 
 ### cifia-100 result
 
-![result](./img/result.PNG)
 
 The implementation of compared methods are based on the author-provided code and a open-source benchmark https://github.com/HobbitLong/RepDistiller.
 
