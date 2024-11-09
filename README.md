@@ -1,7 +1,5 @@
 # OTGD
 
-![gif](./img/HKD.gif)
-
 Code for ICONIP 2024 paper "Knowledge Distillation with Differentiable Optimal Transport on Graph Neural Networks"
 
 https://arxiv.org/abs/2108.05507
