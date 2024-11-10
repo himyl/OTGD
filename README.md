@@ -38,14 +38,7 @@ conda install --yes --file requirements.txt
 ## Citation
 
 ```
-@InProceedings{Zhou_2021_ICCV,
-    author    = {Zhou, Sheng and Wang, Yucheng and Chen, Defang and Chen, Jiawei and Wang, Xin and Wang, Can and Bu, Jiajun},
-    title     = {Distilling Holistic Knowledge With Graph Neural Networks},
-    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
-    month     = {October},
-    year      = {2021},
-    pages     = {10387-10396}
-}
+wait for camera ready
 ```
 
 ## Acknowledgement
