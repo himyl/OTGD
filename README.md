@@ -6,10 +6,6 @@ https://arxiv.org/abs/2108.05507
 
 ![model](./img/model.jpg)
 
-### cifia-100 result
-
-
-The implementation of compared methods are based on the author-provided code and a open-source benchmark https://github.com/HobbitLong/RepDistiller.
 
 ## Installation
 ```
@@ -43,3 +39,6 @@ conda install --yes --file requirements.txt
     pages     = {10387-10396}
 }
 ```
+
+## Acknowledgement
+This repo is based on the implementation of [CRD](https://github.com/HobbitLong/RepDistiller).
